@@ -53,6 +53,18 @@ assert_deny() {
   if "$SF" "$@" >/dev/null 2>&1; then bad "$desc (expected failure, but it succeeded)"; else ok "$desc"; fi
 }
 
+# Same, but run sandfence with its cwd set to <dir> — so the granted working
+# copy is <dir> (sandfence grants the directory it's launched from).
+sf_in() { local d="$1"; shift; ( cd "$d" && "$SF" "$@" ); }
+assert_allow_in() {
+  local d="$1" desc="$2"; shift 2
+  if sf_in "$d" "$@" >/dev/null 2>&1; then ok "$desc"; else bad "$desc (expected success, got failure)"; fi
+}
+assert_deny_in() {
+  local d="$1" desc="$2"; shift 2
+  if sf_in "$d" "$@" >/dev/null 2>&1; then bad "$desc (expected failure, but it succeeded)"; else ok "$desc"; fi
+}
+
 echo "sandfence enforcement tests"
 echo "  script:  $SF"
 echo "  workdir: $root"
@@ -87,6 +99,51 @@ if [ -d "$HOME/.ssh" ]; then
   assert_deny "listing ~/.ssh is denied"             /bin/ls "$HOME/.ssh"
 else
   skip "listing ~/.ssh is denied (~/.ssh does not exist)"
+fi
+
+echo
+echo "[launch guard]"
+# Launching with the working copy = $HOME (or /) is refused outright — it would
+# grant the whole home tree read-write. The wrapper refuses before sandboxing.
+assert_deny_in "$HOME" "launching from \$HOME is refused"          /usr/bin/true
+
+echo
+echo "[working copy]"
+
+# A real git repo under the (non-temp) test root. Setup runs UNsandboxed and
+# must fully succeed (set -e), else the probes below would test nothing.
+wc="$root/wc"
+rm -rf "$wc"; mkdir -p "$wc"
+(
+  set -e
+  export GIT_CONFIG_GLOBAL=/dev/null   # hermetic: ignore the user's global signing/hooks/templates
+  cd "$wc"
+  git init -q
+  git config user.email sandfence@test.local
+  git config user.name  "sandfence test"
+  printf 'hello\n' > tracked.txt
+  git add -f tracked.txt               # -f: ignore any global excludes (~/.config/git/ignore)
+  git commit -qm init
+) >/dev/null 2>&1
+head_before="$(git -C "$wc" rev-parse HEAD 2>/dev/null || true)"
+if [ -z "$head_before" ]; then
+  bad "setup: test git repo has no initial commit (setup failed — probes skipped)"
+else
+  # The working copy is read-write…
+  assert_allow_in "$wc" "edit a tracked file in the working copy" /bin/sh -c 'echo more >> tracked.txt'
+  assert_allow_in "$wc" "create a new file in the working copy"    /bin/sh -c 'echo x > newfile.txt'
+  # …but its own .git is not writable, so history can't be rewritten.
+  assert_deny_in  "$wc" "writing inside .git is denied"            /bin/sh -c 'echo x > .git/sandfence_intrusion'
+  # git init in a scratch SUBDIR works (the deny is only the top-level .git), which
+  # also proves git genuinely runs in the sandbox — so a commit failure below is the
+  # sandbox denying the .git write, not git being broken.
+  assert_allow_in "$wc" "git init in a scratch subdir is allowed"  /bin/sh -c 'rm -rf scratch && mkdir scratch && cd scratch && git init -q'
+  # The commit must be denied AND must not have moved HEAD. Disable hooks/signing
+  # so the attempt reaches the actual .git write rather than failing earlier.
+  assert_deny_in  "$wc" "git commit is denied"                     git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit --allow-empty -m probe
+  head_after="$(git -C "$wc" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$head_after" = "$head_before" ]; then ok "git commit left HEAD unchanged";
+  else bad "git commit moved HEAD ($head_before -> $head_after)"; fi
 fi
 
 echo

@@ -4,9 +4,10 @@ set -euo pipefail
 # ============================================================================
 # sandfence.sh — run a command under a default-deny macOS sandbox-exec profile.
 #
-# The baseline grants only the boring, secret-free necessities — system runtime,
-# temp, devices, process, and network — so a program can exec and run. Nothing
-# under $HOME is granted, so secrets (~/.ssh, ~/.aws, the login Keychain) stay denied.
+# Grants the secret-free system baseline plus the working copy: the current
+# directory is read-write, with its own .git/.jj write-denied so the agent can
+# edit code but not rewrite history. Nothing else under $HOME is granted —
+# ~/.ssh, ~/.aws, the login Keychain, ~/.gitconfig credentials stay denied.
 #
 # Usage:  sandfence.sh [--print] <tool> [args...]
 # ============================================================================
@@ -17,6 +18,35 @@ usage() {
     '  --print    print the composed SBPL profile and exit (also -p)' \
     '  <tool>     any command on PATH (resolved by sandbox-exec)'
   exit "${1:-1}"
+}
+
+# ---------------------------------------------------------------------------
+# Path helpers. Profile rules accumulate in $dynamic; per-repo write-denies in
+# $repo_deny, which is emitted LAST so last-match-wins beats the read-write grant.
+# ---------------------------------------------------------------------------
+validate_path() {             # <path> <label> — require an absolute, SBPL-safe path
+  local p="$1" label="$2"
+  case "$p" in /*) ;; *) echo "sandfence.sh: $label is not an absolute path: $p" >&2; exit 1 ;; esac
+  if [[ "$p" == *'"'* || "$p" == *'\'* || "$p" =~ [[:cntrl:]] ]]; then
+    echo "sandfence.sh: $label has unsafe characters (quote, backslash, control): $p" >&2; exit 1
+  fi
+}
+resolve_dir() { cd "$1" 2>/dev/null && pwd -P; }   # canonicalize a dir (resolve symlinks)
+
+# A (subpath ...) grant does NOT confer the right to traverse the path's parents,
+# so each granted root needs lookup-only (metadata) literals up its chain — enough
+# to walk in, not to list. ("/" itself is granted in the baseline.)
+emit_ancestors() {            # <abs-path> — emit metadata-only traversal for each parent
+  local p="$1"
+  case "$p" in /*) ;; *) return 0 ;; esac
+  while p="${p%/*}"; [ -n "$p" ]; do
+    dynamic+="(allow file-read-metadata (literal \"$p\"))"$'\n'
+  done
+}
+grant_rw()      { validate_path "$1" grant; emit_ancestors "$1"; dynamic+="(allow file-read* file-write* (subpath \"$1\"))"$'\n'; }   # read-write dir
+sect()          { dynamic+=";; --- $1 ---"$'\n'; }                                                                                    # labeled comment in the profile
+deny_repo_meta() {            # <abs-dir> — write-deny its own top-level .git/.jj
+  repo_deny+="(deny file-write* (subpath \"$1/.git\") (literal \"$1/.git\") (subpath \"$1/.jj\") (literal \"$1/.jj\"))"$'\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -83,6 +113,14 @@ IFS= read -r -d '' static_body <<'SBPL' || true
     (home-literal "/Library/Preferences/.GlobalPreferences.plist")
     (literal "/etc") (literal "/var"))         ;; compat symlinks tools hardcode
 
+;; --- Apple toolchain resolver (read-only) ----------------------------------
+;; git/cc/python3 stubs find the real binary via these selectors; the Xcode
+;; license plist is their license check (a denial fails every git op). We do NOT
+;; grant ~/.gitconfig / XDG git config — they can carry credentials; git uses an
+;; empty global config instead (GIT_CONFIG_GLOBAL below), and commits are denied.
+(allow file-read* (subpath "/private/var/select"))
+(allow file-read* (literal "/Library/Preferences/com.apple.dt.Xcode.plist"))
+
 ;; --- Temp (read-write) -----------------------------------------------------
 (allow file-read* file-write*
     (subpath "/tmp") (subpath "/private/tmp")
@@ -136,9 +174,41 @@ IFS= read -r -d '' static_body <<'SBPL' || true
 ;; large, the login Keychain, ~/.ssh, ~/.aws, gh/glab tokens, Docker sockets.
 SBPL
 
+# ---------------------------------------------------------------------------
+# Working copy: the current dir, read-write (reaching it needs ancestor
+# traversal). Its own top-level .git/.jj is write-denied via $repo_deny (emitted
+# last) so the agent can edit code but can't commit, amend, or rewrite history.
+# HOME is interpolated into (literal ...); validate it before composing.
+# ---------------------------------------------------------------------------
+validate_path "$HOME" "HOME"
+workdir="$(resolve_dir "$PWD")" || { echo "sandfence.sh: cannot resolve working directory ($PWD)" >&2; exit 1; }
+
+# Refuse / or $HOME (or a parent of $HOME) as the working copy — that would expose
+# every secret under your home. Run from a project subdirectory instead. (The
+# launcher is trusted, so a plain path check is enough.)
+home_real="$(resolve_dir "$HOME")" || home_real="$HOME"
+if [ "$workdir" = "/" ] || [ "$workdir" = "$home_real" ]; then
+  echo "sandfence.sh: refusing to grant '$workdir' read-write — run from a project subdirectory, not / or \$HOME" >&2; exit 1
+fi
+case "$home_real/" in
+  "$workdir"/*) echo "sandfence.sh: refusing to grant '$workdir' read-write — it contains your home directory" >&2; exit 1 ;;
+esac
+
+dynamic=";; --- working copy (read-write) ---"$'\n'
+repo_deny=";; --- repo history: working copy's own .git/.jj write-denied (last) ---"$'\n'
+grant_rw "$workdir"
+deny_repo_meta "$workdir"
+
+# Point git at an empty global config (we don't grant ~/.gitconfig — it can carry
+# credentials), so git neither reads it nor warns on the denied path; commits are
+# denied anyway. Soft default so a caller-set GIT_CONFIG_GLOBAL (granted) still wins.
+export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-/dev/null}"
+
 profile="(version 1)
 (define HOME_DIR \"$HOME\")
-$static_body"
+$static_body
+$dynamic
+$repo_deny"
 
 [[ -n "$print_only" ]] && { printf '%s\n' "$profile"; exit 0; }
 
