@@ -169,6 +169,70 @@ else
 fi
 
 echo
+echo "[agents]"
+# The claude / codex bundles (--claude / --codex, or the agent as the tool) grant each agent's
+# own binary + state dir — auth lives in a file there (~/.claude/.credentials.json, ~/.codex/
+# auth.json), never the Keychain — while write-denying the persistence files (settings.json /
+# config.toml) that would otherwise fire hooks on a later UNsandboxed run. We drive the bundle
+# with the FLAGS (they apply a bundle regardless of the command actually run) plus a harmless
+# probe, with HOME redirected to an isolated fake home so nothing touches your real ~/.claude /
+# ~/.codex (same trick as the jj XDG test). The bundle reads $HOME from the env, so a redirected
+# HOME relocates every agent grant under the test root.
+fakehome="$root/fakehome"
+rm -rf "$fakehome"
+mkdir -p "$fakehome/.claude" "$fakehome/.codex" "$fakehome/.ssh" "$fakehome/Library/Keychains"
+# Allow-probe targets must be readable UNsandboxed first, so an in-sandbox denial is provably the
+# sandbox's doing and not a missing file (a false PASS) — same discipline as the baseline probes.
+printf '{"claudeAiOauth":{}}\n'  > "$fakehome/.claude/.credentials.json"
+printf '{"ORIG":true}\n'         > "$fakehome/.claude/settings.json"
+printf 'ORIG\n'                  > "$fakehome/.codex/auth.json"
+printf 'model = "orig"\n'        > "$fakehome/.codex/config.toml"
+printf 'KEYCHAINSECRET\n'        > "$fakehome/Library/Keychains/login.keychain-db"
+
+sf_home() { ( cd "$wc" && HOME="$fakehome" "$SF" "$@" ); }   # sandfence from the workspace, fake HOME
+assert_allow_home() { local d="$1"; shift; if sf_home "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d (expected success, got failure)"; fi; }
+assert_deny_home()  { local d="$1"; shift; if sf_home "$@" >/dev/null 2>&1; then bad "$d (expected failure, but it succeeded)"; else ok "$d"; fi; }
+
+# claude: own state reachable (incl. the file-based credential), so the agent can authenticate.
+assert_allow_home "claude: own ~/.claude/.credentials.json is readable"  --claude /bin/cat "$fakehome/.claude/.credentials.json"
+assert_allow_home "claude: own ~/.claude state dir is writable"          --claude /bin/sh -c "echo x > '$fakehome/.claude/state_probe'"
+# …but settings.json is write-denied (it carries hooks/statusLine/apiKeyHelper that would run on a
+# later UNsandboxed claude). Check the file CONTENT, not just exit code: it must be byte-unchanged.
+sf_home --claude /bin/sh -c "echo CLOBBER > '$fakehome/.claude/settings.json'" >/dev/null 2>&1
+if grep -q CLOBBER "$fakehome/.claude/settings.json" 2>/dev/null; then
+  bad "claude: settings.json write is denied (persistence guard)"
+else ok "claude: settings.json write is denied (persistence guard)"; fi
+# The login Keychain is never granted, even with the claude bundle active.
+assert_deny_home "claude: login Keychain is denied"                      --claude /bin/cat "$fakehome/Library/Keychains/login.keychain-db"
+
+# codex: own state incl. auth.json writable (it stores + refreshes its token there)…
+assert_allow_home "codex: own ~/.codex/auth.json is writable"            --codex /bin/sh -c "echo x >> '$fakehome/.codex/auth.json'"
+# …but config.toml (MCP servers / notify hooks → run on a later UNsandboxed codex) is write-denied.
+sf_home --codex /bin/sh -c "echo CLOBBER > '$fakehome/.codex/config.toml'" >/dev/null 2>&1
+if grep -q CLOBBER "$fakehome/.codex/config.toml" 2>/dev/null; then
+  bad "codex: config.toml write is denied (persistence guard)"
+else ok "codex: config.toml write is denied (persistence guard)"; fi
+
+# codex node-runtime grant is restricted to the canonical nvm layout (~/.nvm/versions/node/<v>),
+# matched positively. A real nvm-style version dir is granted read-only…
+nvmdir="$fakehome/.nvm/versions/node/v99"; mkdir -p "$nvmdir/bin" "$nvmdir/lib"
+: > "$nvmdir/bin/node"
+printf '#!/bin/sh\nexit 0\n' > "$nvmdir/bin/codex"; chmod +x "$nvmdir/bin/codex"
+printf 'NODELIB\n' > "$nvmdir/lib/marker"
+if ( cd "$wc" && HOME="$fakehome" PATH="$nvmdir/bin:$PATH" "$SF" --codex /bin/cat "$nvmdir/lib/marker" ) >/dev/null 2>&1; then
+  ok "codex: an nvm node version dir is granted read-only"
+else bad "codex: an nvm node version dir is granted read-only (expected readable)"; fi
+# …but a NON-nvm codex (e.g. ~/.local/bin/codex) must NOT auto-grant its prefix — that would
+# read-expose all of ~/.local. A secret under ~/.local/share stays unreadable.
+mkdir -p "$fakehome/.local/bin" "$fakehome/.local/share"
+: > "$fakehome/.local/bin/node"
+printf '#!/bin/sh\nexit 0\n' > "$fakehome/.local/bin/codex"; chmod +x "$fakehome/.local/bin/codex"
+printf 'LOCALSECRET\n' > "$fakehome/.local/share/secret"
+if ( cd "$wc" && HOME="$fakehome" PATH="$fakehome/.local/bin:$PATH" "$SF" --codex /bin/cat "$fakehome/.local/share/secret" ) >/dev/null 2>&1; then
+  bad "codex: a non-nvm prefix (~/.local/bin) does NOT grant ~/.local"
+else ok "codex: a non-nvm prefix (~/.local/bin) does NOT grant ~/.local"; fi
+
+echo
 echo "[environment]"
 # Ambient env vars are NOT inherited — only an operational allowlist passes through — so
 # secrets in the caller's shell can't leak to the sandboxed command or its children. Probe

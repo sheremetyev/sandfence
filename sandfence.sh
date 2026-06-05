@@ -17,6 +17,8 @@ usage() {
     'Usage: sandfence.sh [-r PATH]... [-w PATH]... [--print] <tool> [args...]' \
     '  -r PATH    read-only access to a dir or file   (repeatable)' \
     '  -w PATH    read-write access to a dir or file  (repeatable; a dir keeps its .git/.jj read-only)' \
+    '  --claude   also grant the claude agent bundle (binary + ~/.claude state; auth via file, not Keychain)' \
+    '  --codex    also grant the codex agent bundle  (binary + node runtime + ~/.codex state)' \
     '  --print    print the composed SBPL profile and exit (also -p)' \
     '  <tool>     any command on PATH (resolved by sandbox-exec)'
   exit "${1:-1}"
@@ -65,13 +67,14 @@ deny_repo_meta() {            # <abs-dir> — write-deny its own top-level .git/
 # ---------------------------------------------------------------------------
 # Parse args: --print, then the tool + its args.
 # ---------------------------------------------------------------------------
-reads=(); writes=(); print_only=""
+reads=(); writes=(); agents=(); print_only=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -r)  [[ $# -ge 2 ]] || { echo "sandfence.sh: -r needs a path" >&2; exit 1; }; reads+=("$2"); shift 2 ;;
     -r*) reads+=("${1#-r}"); shift ;;
     -w)  [[ $# -ge 2 ]] || { echo "sandfence.sh: -w needs a path" >&2; exit 1; }; writes+=("$2"); shift 2 ;;
     -w*) writes+=("${1#-w}"); shift ;;
+    --claude|--codex) agents+=("${1#--}"); shift ;;
     -p|--print) print_only=1; shift ;;
     -h|--help)  usage 0 ;;
     --)         shift; break ;;
@@ -80,12 +83,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 if [[ $# -ge 1 ]]; then
-  tool="$1"; shift; cmd=("$tool")
+  tool="$1"; shift
+  case "$tool" in
+    claude) cmd=("$(command -v claude || true)" --dangerously-skip-permissions) ;;
+    codex)  cmd=("$(command -v codex || true)" --dangerously-bypass-approvals-and-sandbox) ;;
+    *)      cmd=("$tool") ;;
+  esac
 elif [[ -n "$print_only" ]]; then
   tool=""; cmd=()                 # --print with no tool: show the baseline profile
 else
   usage 1
 fi
+# The tool's own bundle auto-applies; --claude/--codex add the OTHER agent's bundle too
+# (e.g. `--codex claude` lets a claude session also read/run codex). See DESIGN.md ("Agent bundles").
+case "$tool" in claude|codex) agents+=("$tool") ;; esac
 
 # ---------------------------------------------------------------------------
 # Static baseline: read-only, secret-free. NOTE: never grant (subpath "/System")
@@ -216,6 +227,59 @@ repo_deny=";; --- repo history: working copy's own .git/.jj write-denied (last) 
 grant_rw "$workdir"
 deny_repo_meta "$workdir"
 
+# ---------------------------------------------------------------------------
+# Agent bundles (--claude/--codex, or claude/codex as the tool): grant each
+# agent's own binary + state dir. Auth is a file there (~/.claude/.credentials.json,
+# ~/.codex/auth.json), never the Keychain. settings.json / config.toml are
+# write-denied — they carry hooks / MCP / notify commands that would fire on a
+# later UNsandboxed run (the deny follows the rw grant, so last-match-wins blocks
+# the write while reads still work). See DESIGN.md ("Agent bundles").
+# ---------------------------------------------------------------------------
+for a in "${agents[@]+"${agents[@]}"}"; do
+  case "$a" in
+    claude)
+      sect "claude: binary (ro) + own state (rw); settings.json write-denied"
+      claude_bin="$(command -v claude || true)"
+      case "$claude_bin" in /*) grant_file "$claude_bin" ;; esac   # absolute only
+      grant_ro "$HOME/.local/share/claude"
+      grant_rw "$HOME/.claude"
+      dynamic+="(deny file-write* (literal \"$HOME/.claude/settings.json\") (literal \"$HOME/.claude/settings.local.json\"))"$'\n'
+      grant_rw "$HOME/.cache/claude"
+      grant_rw "$HOME/.local/state/claude"
+      dynamic+="(allow file-read* file-write* (prefix \"$HOME/.claude.json\"))"$'\n'   # ~/.claude.json[.backup]: session/project state
+      dynamic+="(allow file-read* file-write* (literal \"$HOME/.claude.lock\"))"$'\n'
+      ;;
+    codex)
+      sect "codex: node runtime (ro) + own state incl. auth.json (rw); config.toml write-denied"
+      grant_rw "$HOME/.codex"
+      dynamic+="(deny file-write* (literal \"$HOME/.codex/config.toml\"))"$'\n'
+      codex_bin="$(command -v codex || true)"
+      case "$codex_bin" in /*) ;; *) codex_bin="" ;; esac   # ignore a relative hit (PATH has '.') — untrusted + would hang emit_ancestors
+      if [[ -n "$codex_bin" ]]; then
+        grant_file "$codex_bin"                               # the codex executable (exec'd only in-sandbox)
+        # codex needs its node runtime readable. Auto-grant ONLY the canonical nvm
+        # layout, matched positively (a blocklist of shared prefixes is never complete).
+        # Other node managers (brew, fnm, volta): grant the version dir with -r.
+        noderoot="${codex_bin%/bin/codex}"                    # …/<v>/bin/codex → the node version dir
+        case "$noderoot" in
+          "$HOME"/.nvm/versions/node/*)
+            grant_ro "$noderoot"
+            dynamic+="(deny file-read* (literal \"$noderoot/etc/npmrc\"))"$'\n' ;;   # …minus its global npmrc (may hold a registry token)
+        esac
+      fi
+      ;;
+  esac
+done
+
+# TLS roots: with the Keychain denied, Rust/OpenSSL tools fail ("no native root CA
+# certificates found"). Point them at the public CA bundle (already a granted read;
+# no Keychain/securityd access). SSL_CERT_FILE is on the env allowlist below.
+if [[ -z "${SSL_CERT_FILE:-}" ]]; then
+  for ca in /private/etc/ssl/cert.pem /etc/ssl/cert.pem; do
+    [[ -r "$ca" ]] && { export SSL_CERT_FILE="$ca"; break; }
+  done
+fi
+
 # git/jj read their global config under $XDG_CONFIG_HOME (default ~/.config). Fall
 # back to ~/.config if it's relative (git/jj ignore a relative XDG too) or SBPL-unsafe.
 xdg_config="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -277,6 +341,16 @@ $repo_deny"
 
 [[ -n "$print_only" ]] && { printf '%s\n' "$profile"; exit 0; }
 
+# Ensure each active agent's config dir exists: once boxed the agent can't create it
+# ($HOME isn't writable inside), so a fresh user's first in-sandbox /login could not
+# save its credentials. After --print so printing has no side effects.
+for a in "${agents[@]+"${agents[@]}"}"; do
+  case "$a" in
+    claude) mkdir -p "$HOME/.claude" 2>/dev/null || true ;;
+    codex)  mkdir -p "$HOME/.codex"  2>/dev/null || true ;;
+  esac
+done
+
 # Run with an ALLOWLISTED environment, not the caller's full env: env vars are inherited
 # regardless of the profile, so ambient secrets (AWS_*, GITHUB_TOKEN, OPENAI_API_KEY,
 # SSH_AUTH_SOCK, …) would otherwise reach the command and every child. Pass only operational
@@ -284,7 +358,7 @@ $repo_deny"
 clean_env=()
 for name in PATH HOME USER LOGNAME SHELL TERM TMPDIR PWD \
             LANG LC_ALL LC_CTYPE TERM_PROGRAM COLORTERM __CF_USER_TEXT_ENCODING \
-            XDG_CONFIG_HOME GIT_CONFIG_GLOBAL; do
+            XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL; do
   [ -n "${!name:-}" ] && clean_env+=("$name=${!name}")   # include only vars that are actually set
 done
 
