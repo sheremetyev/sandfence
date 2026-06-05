@@ -199,9 +199,26 @@ repo_deny=";; --- repo history: working copy's own .git/.jj write-denied (last) 
 grant_rw "$workdir"
 deny_repo_meta "$workdir"
 
+# git/jj read their global config under $XDG_CONFIG_HOME (default ~/.config). Fall
+# back to ~/.config if it's relative (git/jj ignore a relative XDG too) or SBPL-unsafe.
+xdg_config="${XDG_CONFIG_HOME:-$HOME/.config}"
+case "$xdg_config" in /*) ;; *) xdg_config="$HOME/.config" ;; esac
+if [[ "$xdg_config" == *'"'* || "$xdg_config" == *'\'* || "$xdg_config" =~ [[:cntrl:]] ]]; then
+  xdg_config="$HOME/.config"
+fi
+
+# Global git ignore/attributes: grant just those two files + dir lookup (not listing),
+# so git honors them without exposing the token-bearing config or credential store alongside.
+xdg_git="$xdg_config/git"
+sect "global git ignore/attributes (read-only)"
+emit_ancestors "$xdg_git"
+dynamic+="(allow file-read-metadata (literal \"$xdg_git\"))"$'\n'
+dynamic+="(allow file-read* (literal \"$xdg_git/ignore\") (literal \"$xdg_git/attributes\"))"$'\n'
+
 # Point git at an empty global config (we don't grant ~/.gitconfig — it can carry
-# credentials), so git neither reads it nor warns on the denied path; commits are
-# denied anyway. Soft default so a caller-set GIT_CONFIG_GLOBAL (granted) still wins.
+# credentials), so git neither reads it nor warns on the denied path; commits are denied
+# anyway. Soft default so a caller-set GIT_CONFIG_GLOBAL (to a granted file) still wins.
+# Global excludes/attributes are honored via read grants above, not this override.
 export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-/dev/null}"
 
 profile="(version 1)

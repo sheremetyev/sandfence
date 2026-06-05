@@ -144,6 +144,11 @@ else
   head_after="$(git -C "$wc" rev-parse HEAD 2>/dev/null || true)"
   if [ "$head_after" = "$head_before" ]; then ok "git commit left HEAD unchanged";
   else bad "git commit moved HEAD ($head_before -> $head_after)"; fi
+  # git runs without warning about the ungranted global excludes file.
+  giterr="$(sf_in "$wc" git status 2>&1 >/dev/null)"
+  if printf '%s' "$giterr" | grep -q 'Operation not permitted'; then
+    bad "git status emits no 'Operation not permitted' warning (got: $giterr)"
+  else ok "git status emits no 'Operation not permitted' warning"; fi
 fi
 
 echo
