@@ -280,5 +280,99 @@ if command -v jj >/dev/null 2>&1; then
 fi
 
 echo
+echo "[worktree / workspace]"
+# A git worktree's .git is a FILE pointing into the MAIN repo's store elsewhere; a secondary jj
+# workspace's .jj/repo is a FILE pointing at the main .jj/repo store. sandfence should grant
+# READ-ONLY access to that main STORE (so history/log work) but NEVER the main repo's working copy
+# (it may hold its own secrets), and only when the main repo is a direct SIBLING of the workspace —
+# so a workspace-controlled (forged) pointer can't reach $HOME / an arbitrary store.
+
+# --- git worktree (git is always present via the Xcode baseline) ---
+mw="$root/mainrepo"; wt="$root/mainrepo.wt"
+rm -rf "$mw" "$wt"; mkdir -p "$mw"
+(
+  set -e
+  export GIT_CONFIG_GLOBAL=/dev/null
+  cd "$mw"
+  git init -q
+  git config user.email sandfence@test.local; git config user.name "sandfence test"
+  printf 'MAINWCSECRET\n' > main_wc_secret.txt
+  git add -f main_wc_secret.txt
+  git commit -qm init
+  git worktree add -q "$wt"
+) >/dev/null 2>&1
+if [ ! -f "$wt/.git" ] || [ ! -r "$mw/main_wc_secret.txt" ]; then
+  bad "setup: git worktree not created (worktree probes skipped)"
+else
+  # The main repo's store is readable from the worktree…
+  assert_allow_in "$wt" "git worktree: main repo .git store is readable"       /bin/cat "$mw/.git/HEAD"
+  # …but the main repo's WORKING COPY (its own files) is not.
+  assert_deny_in  "$wt" "git worktree: main repo working copy is NOT readable"  /bin/cat "$mw/main_wc_secret.txt"
+  # A main repo one level deeper (NOT a sibling of the worktree) is not auto-granted.
+  nsmain="$root/deeper/nsmain"; nswt="$root/nsmain.wt"
+  rm -rf "$root/deeper" "$nswt"; mkdir -p "$nsmain"
+  (
+    set -e
+    export GIT_CONFIG_GLOBAL=/dev/null
+    cd "$nsmain"
+    git init -q
+    git config user.email sandfence@test.local; git config user.name "sandfence test"
+    printf 'x\n' > f.txt; git add -f f.txt; git commit -qm init
+    git worktree add -q "$nswt"
+  ) >/dev/null 2>&1
+  if [ -f "$nswt/.git" ]; then
+    assert_deny_in "$nswt" "git worktree: a NON-sibling main store is NOT auto-granted" /bin/cat "$nsmain/.git/HEAD"
+  else
+    bad "setup: non-sibling worktree not created (probe skipped)"
+  fi
+fi
+
+# --- jj workspace (only if jj is installed) ---
+if command -v jj >/dev/null 2>&1; then
+  jjmain="$root/jjmain"; jjws="$root/jjmain.ws"; jjxdg2="$root/jjxdg2"
+  rm -rf "$jjmain" "$jjws" "$jjxdg2"; mkdir -p "$jjmain"
+  (
+    set -e
+    export XDG_CONFIG_HOME="$jjxdg2" GIT_CONFIG_GLOBAL=/dev/null
+    unset JJ_CONFIG
+    cd "$jjmain"
+    jj git init
+    printf 'JJMAINWCSECRET\n' > main_wc_secret.txt
+    jj workspace add "$jjws"            # secondary workspace → its .jj/repo is a file pointing here
+  ) >/dev/null 2>&1
+  export XDG_CONFIG_HOME="$jjxdg2"; unset JJ_CONFIG
+  if [ ! -f "$jjws/.jj/repo" ] || [ ! -r "$jjmain/main_wc_secret.txt" ]; then
+    bad "setup: jj workspace not created (jj workspace probes skipped)"
+  else
+    assert_allow_in "$jjws" "jj workspace: main .jj/repo store is readable"       /bin/ls "$jjmain/.jj/repo"
+    assert_deny_in  "$jjws" "jj workspace: main repo working copy is NOT readable" /bin/cat "$jjmain/main_wc_secret.txt"
+  fi
+  # A forged .jj/repo FILE claiming the store lives at $HOME must NOT grant $HOME.
+  forge="$root/forged.ws"; rm -rf "$forge"; mkdir -p "$forge/.jj"
+  printf '%s' "$HOME" > "$forge/.jj/repo"
+  hprobe="$HOME/.sandfence_wt_probe.$$"
+  printf 'HOMEWCSECRET\n' > "$hprobe" 2>/dev/null
+  if [ -r "$hprobe" ]; then
+    assert_deny_in "$forge" "jj workspace: a forged .jj/repo pointing at \$HOME is NOT granted" /bin/cat "$hprobe"
+    rm -f "$hprobe"
+  else
+    skip "jj workspace: forged-pointer probe (could not create \$HOME probe)"
+  fi
+  # A forged workspace whose sibling main .git is a SYMLINK (not a real in-place store) must NOT get
+  # a backend grant — the resolver canonicalizes + validates it. The OS also blocks the symlink at
+  # access time, so the observable property here is the emitted profile: assert via --print that no
+  # backend grant is produced for the symlinked .git.
+  bmain="$root/bmain"; bws="$root/bws"; rm -rf "$bmain" "$bws"
+  mkdir -p "$bmain/.jj/repo/store" "$bws/.jj"
+  ln -s "$HOME" "$bmain/.git"                       # forged backend → $HOME (not a real .git store)
+  printf '%s/.jj/repo' "$bmain" > "$bws/.jj/repo"
+  if ( cd "$bws" && "$SF" --print ) 2>/dev/null | grep -q 'git backend'; then
+    bad "jj workspace: a symlinked (non-store) main .git backend is NOT granted"
+  else ok "jj workspace: a symlinked (non-store) main .git backend is NOT granted"; fi
+  rm -f "$bmain/.git"
+  unset XDG_CONFIG_HOME
+fi
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

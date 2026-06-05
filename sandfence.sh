@@ -60,6 +60,16 @@ resolve_file() {              # canonicalize a file path (resolve symlinks in it
   dir="$(cd "$dir" 2>/dev/null && pwd -P)" || return 1
   printf '%s/%s\n' "${dir%/}" "$base"   # %/ strips a trailing slash so root yields /foo, not //foo
 }
+abspath() {                   # <path> <base> — resolve to a canonical abs dir (path may be relative to
+  [ -n "$1" ] || return 0     # base, or empty); prints nothing if unresolvable. Follows a VCS pointer to its store.
+  case "$1" in
+    /*) ( cd "$1"    2>/dev/null && pwd -P ) ;;
+    *)  ( cd "$2/$1" 2>/dev/null && pwd -P ) ;;
+  esac || true
+}
+is_git_store() {              # <dir> — a REAL git store: basename .git, with HEAD + objects/
+  [ "${1##*/}" = .git ] && [ -e "$1/HEAD" ] && [ -d "$1/objects" ]
+}
 deny_repo_meta() {            # <abs-dir> — write-deny its own top-level .git/.jj
   repo_deny+="(deny file-write* (subpath \"$1/.git\") (literal \"$1/.git\") (subpath \"$1/.jj\") (literal \"$1/.jj\"))"$'\n'
 }
@@ -226,6 +236,35 @@ dynamic=";; --- working copy (read-write) ---"$'\n'
 repo_deny=";; --- repo history: working copy's own .git/.jj write-denied (last) ---"$'\n'
 grant_rw "$workdir"
 deny_repo_meta "$workdir"
+
+# Worktree / workspace: if the working copy's VCS metadata points at a MAIN repo
+# elsewhere, grant READ-ONLY access to that repo's STORE only — never its working
+# copy (which may hold its own secrets). The pointer is repo-controlled, so we
+# require a REAL VCS store that is a direct SIBLING of the workspace; other layouts,
+# pass the store with -r (e.g. -r ../main/.git). See DESIGN.md ("Worktrees").
+# Resolution runs unsandboxed; /usr/bin/git is absolute so a hostile PATH can't hijack it.
+if [ -x /usr/bin/git ] && [ -f "$workdir/.git" ]; then               # git worktree: .git is a FILE
+  gitcommon="$(abspath "$(cd "$workdir" && /usr/bin/git rev-parse --git-common-dir 2>/dev/null || true)" "$workdir")"
+  mainroot="${gitcommon%/*}"                                         # common dir is <mainroot>/.git
+  if [ -n "$gitcommon" ] && is_git_store "$gitcommon" \
+     && [ -n "${mainroot%/*}" ] && [ "${mainroot%/*}" = "${workdir%/*}" ]; then   # real store + non-root sibling
+    sect "main repo .git store (sibling worktree, read-only)"; grant_ro "$gitcommon"
+  fi
+fi
+if [ -f "$workdir/.jj/repo" ]; then                                  # secondary jj workspace: .jj/repo is a FILE
+  jjrepo="$(abspath "$(<"$workdir/.jj/repo")" "$workdir/.jj")"   # → the main .jj/repo store (read via builtin)
+  mainroot="${jjrepo%/.jj/repo}"                                     # store is <mainroot>/.jj/repo
+  if [ -n "$jjrepo" ] && [ "${jjrepo##*/.jj/}" = repo ] && [ -d "$jjrepo/store" ] \
+     && [ -n "${mainroot%/*}" ] && [ "${mainroot%/*}" = "${workdir%/*}" ]; then   # real store + non-root sibling
+    sect "main repo .jj store (sibling workspace, read-only)"; grant_ro "$jjrepo"
+    # jj uses a git backend: a colocated main repo keeps its commits in <mainroot>/.git.
+    # Validate it like the worktree store so a forged/symlinked .git can't redirect the grant.
+    gitbackend="$(abspath "$mainroot/.git" "$mainroot")"
+    if [ -n "$gitbackend" ] && is_git_store "$gitbackend" && [ "${gitbackend%/*}" = "$mainroot" ]; then
+      sect "main repo git backend (.git, read-only)"; grant_ro "$gitbackend"
+    fi
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Agent bundles (--claude/--codex, or claude/codex as the tool): grant each
