@@ -152,6 +152,23 @@ else
 fi
 
 echo
+echo "[-r / -w]"
+ro="$root/extra-ro"; rw="$root/extra-rw"
+rm -rf "$ro" "$rw"; mkdir -p "$ro" "$rw"
+printf 'readme\n' > "$ro/file.txt"
+( cd "$rw" && git init -q ) >/dev/null 2>&1     # give the -w dir a .git to test the carve-out
+assert_deny_in  "$wc" "a dir is NOT readable without -r"      /bin/cat "$ro/file.txt"
+assert_allow_in "$wc" "-r dir: file is readable"              -r "$ro" /bin/cat "$ro/file.txt"
+assert_deny_in  "$wc" "-r dir: not writable"                  -r "$ro" /bin/sh -c "echo x > '$ro/new.txt'"
+assert_allow_in "$wc" "-r file: a single file is readable"    -r "$ro/file.txt" /bin/cat "$ro/file.txt"
+assert_allow_in "$wc" "-w dir: writable"                      -w "$rw" /bin/sh -c "echo x > '$rw/new.txt'"
+if [ -d "$rw/.git" ]; then
+  assert_deny_in "$wc" "-w dir: its own .git is write-denied"  -w "$rw" /bin/sh -c "echo x > '$rw/.git/intrusion'"
+else
+  bad "setup: could not git-init the -w test dir (.git probe skipped)"
+fi
+
+echo
 echo "[environment]"
 # Ambient env vars are NOT inherited — only an operational allowlist passes through — so
 # secrets in the caller's shell can't leak to the sandboxed command or its children. Probe

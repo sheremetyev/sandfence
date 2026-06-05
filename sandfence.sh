@@ -14,7 +14,9 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'Usage: sandfence.sh [--print] <tool> [args...]' \
+    'Usage: sandfence.sh [-r PATH]... [-w PATH]... [--print] <tool> [args...]' \
+    '  -r PATH    read-only access to a dir or file   (repeatable)' \
+    '  -w PATH    read-write access to a dir or file  (repeatable; a dir keeps its .git/.jj read-only)' \
     '  --print    print the composed SBPL profile and exit (also -p)' \
     '  <tool>     any command on PATH (resolved by sandbox-exec)'
   exit "${1:-1}"
@@ -46,7 +48,16 @@ emit_ancestors() {            # <abs-path> — emit metadata-only traversal for 
 grant_rw()      { validate_path "$1" grant; emit_ancestors "$1"; dynamic+="(allow file-read* file-write* (subpath \"$1\"))"$'\n'; }   # read-write dir
 grant_ro()      { validate_path "$1" grant; emit_ancestors "$1"; dynamic+="(allow file-read* (subpath \"$1\"))"$'\n'; }               # read-only dir
 grant_file()    { validate_path "$1" grant; emit_ancestors "$1"; dynamic+="(allow file-read* (literal \"$1\"))"$'\n'; }               # read one file
+grant_file_rw() { validate_path "$1" grant; emit_ancestors "$1"; dynamic+="(allow file-read* file-write* (literal \"$1\"))"$'\n'; }   # read-write one file
 sect()          { dynamic+=";; --- $1 ---"$'\n'; }                                                                                    # labeled comment in the profile
+
+resolve_file() {              # canonicalize a file path (resolve symlinks in its parent dir)
+  local dir="${1%/*}" base="${1##*/}"
+  [ "$dir" = "$1" ] && dir="."   # no slash → relative to cwd
+  [ -z "$dir" ] && dir="/"        # file directly under the root, e.g. /foo
+  dir="$(cd "$dir" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s\n' "${dir%/}" "$base"   # %/ strips a trailing slash so root yields /foo, not //foo
+}
 deny_repo_meta() {            # <abs-dir> — write-deny its own top-level .git/.jj
   repo_deny+="(deny file-write* (subpath \"$1/.git\") (literal \"$1/.git\") (subpath \"$1/.jj\") (literal \"$1/.jj\"))"$'\n'
 }
@@ -54,9 +65,13 @@ deny_repo_meta() {            # <abs-dir> — write-deny its own top-level .git/
 # ---------------------------------------------------------------------------
 # Parse args: --print, then the tool + its args.
 # ---------------------------------------------------------------------------
-print_only=""
+reads=(); writes=(); print_only=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -r)  [[ $# -ge 2 ]] || { echo "sandfence.sh: -r needs a path" >&2; exit 1; }; reads+=("$2"); shift 2 ;;
+    -r*) reads+=("${1#-r}"); shift ;;
+    -w)  [[ $# -ge 2 ]] || { echo "sandfence.sh: -w needs a path" >&2; exit 1; }; writes+=("$2"); shift 2 ;;
+    -w*) writes+=("${1#-w}"); shift ;;
     -p|--print) print_only=1; shift ;;
     -h|--help)  usage 0 ;;
     --)         shift; break ;;
@@ -228,6 +243,25 @@ if [[ "$jj_bin" == /* ]]; then                          # jj is installed at an 
   grant_file "$jj_bin"
   grant_ro "$xdg_config/jj"
 fi
+
+# -r / -w: extra read-only / read-write access to a dir or single file (repeatable).
+# Emitted LAST so an explicit grant WINS over a preset/agent deny (e.g. -r ~/.cargo/config.toml
+# re-opens what --rust denied). A -w dir keeps its own .git/.jj read-only; -r is read-only
+# wholesale. Explicit opt-ins, so (unlike the working copy) not home-guarded. (The .git/.jj
+# history denies still come after, in $repo_deny, so those stay non-overridable.)
+if [[ ${#writes[@]} -gt 0 || ${#reads[@]} -gt 0 ]]; then
+  sect "extra access (-r / -w; wins over presets/agents)"
+fi
+for p in "${writes[@]+"${writes[@]}"}"; do
+  if   [ -d "$p" ]; then rp="$(resolve_dir  "$p")" || { echo "sandfence.sh: -w: cannot resolve: $p" >&2; exit 1; }; grant_rw "$rp"; deny_repo_meta "$rp"
+  elif [ -e "$p" ]; then rp="$(resolve_file "$p")" || { echo "sandfence.sh: -w: cannot resolve: $p" >&2; exit 1; }; grant_file_rw "$rp"
+  else echo "sandfence.sh: -w: no such file or directory: $p" >&2; exit 1; fi
+done
+for p in "${reads[@]+"${reads[@]}"}"; do
+  if   [ -d "$p" ]; then rp="$(resolve_dir  "$p")" || { echo "sandfence.sh: -r: cannot resolve: $p" >&2; exit 1; }; grant_ro "$rp"
+  elif [ -e "$p" ]; then rp="$(resolve_file "$p")" || { echo "sandfence.sh: -r: cannot resolve: $p" >&2; exit 1; }; grant_file "$rp"
+  else echo "sandfence.sh: -r: no such file or directory: $p" >&2; exit 1; fi
+done
 
 # Point git at an empty global config (we don't grant ~/.gitconfig — it can carry
 # credentials), so git neither reads it nor warns on the denied path; commits are denied
