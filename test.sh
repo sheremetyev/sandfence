@@ -233,6 +233,56 @@ if ( cd "$wc" && HOME="$fakehome" PATH="$fakehome/.local/bin:$PATH" "$SF" --code
 else ok "codex: a non-nvm prefix (~/.local/bin) does NOT grant ~/.local"; fi
 
 echo
+echo "[toolchains]"
+# Presets are named -r/-w bundles: toolchain caches writable, but registry TOKENS and PATH-plant
+# vectors (bin dirs) stay denied. Probed via the FLAGS with the isolated fake HOME from [agents] (so
+# nothing touches your real ~/.cargo / ~/.nvm). We test the security carve-outs, not a real build
+# (that's a manual smoke test). sf_home / assert_*_home are defined in [agents] above.
+
+# --- rust ---
+mkdir -p "$fakehome/.rustup" "$fakehome/.cargo/bin" "$fakehome/.cargo/registry"
+printf 'TOOLCHAIN\n' > "$fakehome/.rustup/marker"
+printf 'token\n'     > "$fakehome/.cargo/credentials.toml"
+assert_allow_home "rust: ~/.cargo cache is writable"            --rust /bin/sh -c "echo x > '$fakehome/.cargo/registry/probe'"
+assert_allow_home "rust: ~/.rustup toolchains are readable"     --rust /bin/cat "$fakehome/.rustup/marker"
+# ~/.cargo/bin is read-only (no PATH-plant). Content check: the file must not appear.
+sf_home --rust /bin/sh -c "echo EVIL > '$fakehome/.cargo/bin/planted'" >/dev/null 2>&1
+if [ -e "$fakehome/.cargo/bin/planted" ]; then bad "rust: ~/.cargo/bin is NOT writable (no PATH-plant)"; rm -f "$fakehome/.cargo/bin/planted"
+else ok "rust: ~/.cargo/bin is NOT writable (no PATH-plant)"; fi
+assert_deny_home  "rust: crates.io credentials are NOT readable" --rust /bin/cat "$fakehome/.cargo/credentials.toml"
+# config.toml can hold a registry.token → not readable; ~/.cargo/env is shell-sourced → not writable.
+printf '[registry]\ntoken="SECRET"\n' > "$fakehome/.cargo/config.toml"
+assert_deny_home "rust: ~/.cargo/config.toml is NOT readable (may hold a registry token)" --rust /bin/cat "$fakehome/.cargo/config.toml"
+# …but an explicit -r overrides the preset deny (it's emitted last) — the documented opt-back-in.
+assert_allow_home "rust: an explicit -r re-opens a preset-denied path" --rust -r "$fakehome/.cargo/config.toml" /bin/cat "$fakehome/.cargo/config.toml"
+printf 'ORIG\n' > "$fakehome/.cargo/env"
+sf_home --rust /bin/sh -c "echo CLOBBER >> '$fakehome/.cargo/env'" >/dev/null 2>&1
+if grep -q CLOBBER "$fakehome/.cargo/env" 2>/dev/null; then bad "rust: ~/.cargo/env is NOT writable (persistence)"
+else ok "rust: ~/.cargo/env is NOT writable (persistence)"; fi
+
+# --- node ---
+mkdir -p "$fakehome/.npm" "$fakehome/.nvm/versions/node/v99"
+printf 'NODELIB\n'            > "$fakehome/.nvm/versions/node/v99/marker"
+printf 'token\n'              > "$fakehome/.npmrc"
+assert_allow_home "node: a PM cache (~/.npm) is writable"          --node /bin/sh -c "echo x > '$fakehome/.npm/probe'"
+assert_allow_home "node: ~/.nvm toolchains are readable"           --node /bin/cat "$fakehome/.nvm/versions/node/v99/marker"
+assert_deny_home  "node: ~/.npmrc (registry token) is NOT readable" --node /bin/cat "$fakehome/.npmrc"
+# the per-version global npmrc under ~/.nvm can also hold a registry token → not readable.
+mkdir -p "$fakehome/.nvm/versions/node/v99/etc"
+printf '//registry.npmjs.org/:_authToken=SECRET\n' > "$fakehome/.nvm/versions/node/v99/etc/npmrc"
+assert_deny_home "node: nvm global npmrc is NOT readable (registry token)" --node /bin/cat "$fakehome/.nvm/versions/node/v99/etc/npmrc"
+# npm logs may hold old tokens → not readable (writes still allowed).
+mkdir -p "$fakehome/.npm/_logs"
+printf '//registry.npmjs.org/:_authToken=SECRET\n' > "$fakehome/.npm/_logs/leak.log"
+assert_deny_home "node: ~/.npm/_logs is NOT readable (old tokens)" --node /bin/cat "$fakehome/.npm/_logs/leak.log"
+
+# --- python ---
+mkdir -p "$fakehome/Library/Caches/pip"
+assert_allow_home "python: pip cache (~/Library/Caches/pip) is writable" --python /bin/sh -c "echo x > '$fakehome/Library/Caches/pip/probe'"
+# --python prepends /usr/bin so python3 resolves to Apple's CLT python, not a brew/pyenv one.
+assert_allow_home "python: python3 resolves under /usr/bin"        --python /bin/sh -c 'case "$(command -v python3)" in /usr/bin/python3) exit 0;; *) exit 1;; esac'
+
+echo
 echo "[environment]"
 # Ambient env vars are NOT inherited — only an operational allowlist passes through — so
 # secrets in the caller's shell can't leak to the sandboxed command or its children. Probe

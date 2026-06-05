@@ -4,12 +4,13 @@ set -euo pipefail
 # ============================================================================
 # sandfence.sh — run a command under a default-deny macOS sandbox-exec profile.
 #
-# Grants the secret-free system baseline plus the working copy: the current
-# directory is read-write, with its own .git/.jj write-denied so the agent can
-# edit code but not rewrite history. Nothing else under $HOME is granted —
-# ~/.ssh, ~/.aws, the login Keychain, ~/.gitconfig credentials stay denied.
+# Grants: system runtime, temp, devices, process + network, the working copy
+# (read-write, its own .git/.jj read-only), and a few read-only tool configs.
+# Denied by default: the rest of $HOME — ~/.ssh, ~/.aws, the login Keychain,
+# ~/.gitconfig credentials. See DESIGN.md for how it works and why each grant exists.
 #
-# Usage:  sandfence.sh [--print] <tool> [args...]
+# Usage:  sandfence.sh [-r PATH]... [-w PATH]... [--rust|--node|--python]
+#                      [--claude|--codex] [--print] <tool> [args...]
 # ============================================================================
 
 usage() {
@@ -19,6 +20,7 @@ usage() {
     '  -w PATH    read-write access to a dir or file  (repeatable; a dir keeps its .git/.jj read-only)' \
     '  --claude   also grant the claude agent bundle (binary + ~/.claude state; auth via file, not Keychain)' \
     '  --codex    also grant the codex agent bundle  (binary + node runtime + ~/.codex state)' \
+    '  --rust/--node/--python  toolchain preset: caches writable, registry tokens + PATH-plant denied' \
     '  --print    print the composed SBPL profile and exit (also -p)' \
     '  <tool>     any command on PATH (resolved by sandbox-exec)'
   exit "${1:-1}"
@@ -75,9 +77,9 @@ deny_repo_meta() {            # <abs-dir> — write-deny its own top-level .git/
 }
 
 # ---------------------------------------------------------------------------
-# Parse args: --print, then the tool + its args.
+# Parse args: flags, then the tool + its args.
 # ---------------------------------------------------------------------------
-reads=(); writes=(); agents=(); print_only=""
+reads=(); writes=(); agents=(); presets=(); print_only=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -r)  [[ $# -ge 2 ]] || { echo "sandfence.sh: -r needs a path" >&2; exit 1; }; reads+=("$2"); shift 2 ;;
@@ -85,6 +87,7 @@ while [[ $# -gt 0 ]]; do
     -w)  [[ $# -ge 2 ]] || { echo "sandfence.sh: -w needs a path" >&2; exit 1; }; writes+=("$2"); shift 2 ;;
     -w*) writes+=("${1#-w}"); shift ;;
     --claude|--codex) agents+=("${1#--}"); shift ;;
+    --rust|--node|--python) presets+=("${1#--}"); shift ;;
     -p|--print) print_only=1; shift ;;
     -h|--help)  usage 0 ;;
     --)         shift; break ;;
@@ -310,6 +313,51 @@ for a in "${agents[@]+"${agents[@]}"}"; do
   esac
 done
 
+# ---------------------------------------------------------------------------
+# Toolchain presets (--rust/--node/--python): named bundles of -r/-w grants.
+# Caches writable, but registry/publish TOKENS and PATH-plant vectors (bin dirs,
+# build-command config) stay denied. Anything here is also doable by hand with
+# -r/-w. Assumes rustup/cargo, nvm, Apple-python layouts; for brew/pyenv/etc. use -r.
+# ---------------------------------------------------------------------------
+for p in "${presets[@]+"${presets[@]}"}"; do
+  case "$p" in
+    rust)
+      sect "preset: rust (toolchains ro; cargo caches rw; bin ro; env/config/token denied)"
+      grant_ro "$HOME/.rustup"                # toolchains: rustc, std
+      grant_rw "$HOME/.cargo"                 # registry/git caches (also provides jj)
+      # ~/.cargo/bin (on PATH) and ~/.cargo/env (shell-sourced) are write-denied so a run
+      # can't plant a PATH binary or shell hook — blocks `cargo install`, not `cargo build`.
+      # config[.toml] (build hooks / registry.token) and credentials are read+write denied.
+      # cargo treats a denied config as absent; re-open a custom one with -r ~/.cargo/config.toml.
+      # All after the rw grant (last-match-wins).
+      dynamic+="(deny file-write* (subpath \"$HOME/.cargo/bin\") (literal \"$HOME/.cargo/env\"))"$'\n'
+      dynamic+="(deny file-read* file-write* (literal \"$HOME/.cargo/config\") (literal \"$HOME/.cargo/config.toml\") (literal \"$HOME/.cargo/credentials.toml\") (literal \"$HOME/.cargo/credentials\"))"$'\n'
+      ;;
+    node)
+      sect "preset: node/npm (nvm ro; npm cache rw; config + registry token denied)"
+      grant_ro "$HOME/.nvm"                   # node versions + nvm
+      grant_rw "$HOME/.npm"                   # npm cache
+      dynamic+="(deny file-read* (subpath \"$HOME/.npm/_logs\"))"$'\n'   # logs can hold old tokens; writes still allowed
+      for nr in "$HOME"/.nvm/versions/node/*/etc/npmrc; do   # each version's global npmrc can hold a registry token
+        [ -e "$nr" ] && dynamic+="(deny file-read* (literal \"$nr\"))"$'\n'
+      done
+      # NOT granted (default-deny): ~/.npmrc + the global config/bin homes — they hold the
+      # registry token and -g install bins. Point npm's USER config at an empty file so it
+      # neither reads your token nor EPERM-crashes. Stock npm only; for pnpm/yarn grant their
+      # store with -w. Private registry / non-nvm node: -r <path> (and set NPM_CONFIG_USERCONFIG
+      # to it). See DESIGN.md ("Toolchain presets").
+      export NPM_CONFIG_USERCONFIG="${NPM_CONFIG_USERCONFIG:-/dev/null}"
+      ;;
+    python)
+      sect "preset: python (pip cache rw; Apple /usr/bin/python3)"
+      grant_rw "$HOME/Library/Caches/pip"     # pip download cache (macOS)
+      # Apple's /usr/bin/python3 (already in the baseline). Prepend /usr/bin so `python3`
+      # resolves to it, not an ungranted brew/pyenv python. For those, grant the prefix with -r.
+      export PATH="/usr/bin:${PATH:-}"
+      ;;
+  esac
+done
+
 # TLS roots: with the Keychain denied, Rust/OpenSSL tools fail ("no native root CA
 # certificates found"). Point them at the public CA bundle (already a granted read;
 # no Keychain/securityd access). SSL_CERT_FILE is on the env allowlist below.
@@ -397,7 +445,7 @@ done
 clean_env=()
 for name in PATH HOME USER LOGNAME SHELL TERM TMPDIR PWD \
             LANG LC_ALL LC_CTYPE TERM_PROGRAM COLORTERM __CF_USER_TEXT_ENCODING \
-            XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL; do
+            XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL NPM_CONFIG_USERCONFIG; do
   [ -n "${!name:-}" ] && clean_env+=("$name=${!name}")   # include only vars that are actually set
 done
 
