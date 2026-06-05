@@ -243,6 +243,18 @@ $repo_deny"
 
 [[ -n "$print_only" ]] && { printf '%s\n' "$profile"; exit 0; }
 
-# Pin absolute paths: the wrapper runs UNsandboxed, so a hostile PATH could
-# otherwise hijack sandbox-exec.
-exec /usr/bin/sandbox-exec -p "$profile" "${cmd[@]}" "$@"
+# Run with an ALLOWLISTED environment, not the caller's full env: env vars are inherited
+# regardless of the profile, so ambient secrets (AWS_*, GITHUB_TOKEN, OPENAI_API_KEY,
+# SSH_AUTH_SOCK, …) would otherwise reach the command and every child. Pass only operational
+# basics (+ the redirects/paths computed above); add a non-secret name below if a task needs it.
+clean_env=()
+for name in PATH HOME USER LOGNAME SHELL TERM TMPDIR PWD \
+            LANG LC_ALL LC_CTYPE TERM_PROGRAM COLORTERM __CF_USER_TEXT_ENCODING \
+            XDG_CONFIG_HOME GIT_CONFIG_GLOBAL; do
+  [ -n "${!name:-}" ] && clean_env+=("$name=${!name}")   # include only vars that are actually set
+done
+
+# Pin absolute paths: the wrapper runs UNsandboxed, so a hostile PATH could otherwise
+# hijack env / sandbox-exec.
+exec /usr/bin/env -i "${clean_env[@]+"${clean_env[@]}"}" \
+  /usr/bin/sandbox-exec -p "$profile" "${cmd[@]}" "$@"

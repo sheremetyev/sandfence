@@ -151,6 +151,23 @@ else
   else ok "git status emits no 'Operation not permitted' warning"; fi
 fi
 
+echo
+echo "[environment]"
+# Ambient env vars are NOT inherited — only an operational allowlist passes through — so
+# secrets in the caller's shell can't leak to the sandboxed command or its children. Probe
+# with /usr/bin/env (prints the REAL environment; /bin/sh would synthesize a default PATH and
+# mask a regression), and treat a failed run as a failure rather than a silent pass.
+if envdump="$( export SANDFENCE_FAKE_SECRET=leaked; sf_in "$root" /usr/bin/env 2>/dev/null )"; then
+  if printf '%s\n' "$envdump" | grep -q '^SANDFENCE_FAKE_SECRET='; then
+    bad "an ambient env var leaked into the sandbox"
+  else ok "an ambient env var is dropped inside the sandbox"; fi
+  if printf '%s\n' "$envdump" | grep -q '^PATH='; then
+    ok "operational basics (PATH) are preserved inside the sandbox"
+  else bad "PATH missing inside the sandbox"; fi
+else
+  bad "environment probe failed to run (sandfence did not execute)"
+fi
+
 if command -v jj >/dev/null 2>&1; then
   echo
   echo "[jj working copy]"
