@@ -44,6 +44,8 @@ emit_ancestors() {            # <abs-path> — emit metadata-only traversal for 
   done
 }
 grant_rw()      { validate_path "$1" grant; emit_ancestors "$1"; dynamic+="(allow file-read* file-write* (subpath \"$1\"))"$'\n'; }   # read-write dir
+grant_ro()      { validate_path "$1" grant; emit_ancestors "$1"; dynamic+="(allow file-read* (subpath \"$1\"))"$'\n'; }               # read-only dir
+grant_file()    { validate_path "$1" grant; emit_ancestors "$1"; dynamic+="(allow file-read* (literal \"$1\"))"$'\n'; }               # read one file
 sect()          { dynamic+=";; --- $1 ---"$'\n'; }                                                                                    # labeled comment in the profile
 deny_repo_meta() {            # <abs-dir> — write-deny its own top-level .git/.jj
   repo_deny+="(deny file-write* (subpath \"$1/.git\") (literal \"$1/.git\") (subpath \"$1/.jj\") (literal \"$1/.jj\"))"$'\n'
@@ -214,6 +216,18 @@ sect "global git ignore/attributes (read-only)"
 emit_ancestors "$xdg_git"
 dynamic+="(allow file-read-metadata (literal \"$xdg_git\"))"$'\n'
 dynamic+="(allow file-read* (literal \"$xdg_git/ignore\") (literal \"$xdg_git/attributes\"))"$'\n'
+
+# jj: grant its binary + read-only user config whenever jj is installed (so jj is
+# available like git, not only inside a jj repo). Read-only config stops a run planting
+# config that fires on a later UNsandboxed jj; .jj in the working copy is write-denied,
+# so read-only jj needs `--ignore-working-copy`. A symlinked/shim install whose target
+# is in an ungranted tree isn't auto-resolved (use -r); cargo/direct installs work.
+jj_bin="$(command -v jj 2>/dev/null || true)"
+if [[ "$jj_bin" == /* ]]; then                          # jj is installed at an absolute path
+  sect "jj: binary (ro) + user config (ro)"
+  grant_file "$jj_bin"
+  grant_ro "$xdg_config/jj"
+fi
 
 # Point git at an empty global config (we don't grant ~/.gitconfig — it can carry
 # credentials), so git neither reads it nor warns on the denied path; commits are denied

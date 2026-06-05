@@ -151,6 +151,36 @@ else
   else ok "git status emits no 'Operation not permitted' warning"; fi
 fi
 
+if command -v jj >/dev/null 2>&1; then
+  echo
+  echo "[jj working copy]"
+  # jj is available even outside a jj repo (the binary grant is not gated on .jj).
+  # $root is a plain dir (not a jj repo), so this exercises the ungated grant.
+  assert_allow_in "$root" "jj runs outside a jj repo"    jj --version
+  # Isolate jj's config under the test root (XDG_CONFIG_HOME) so the suite doesn't
+  # register test repos in the real ~/.config/jj. sandfence's jj-config grant follows
+  # XDG_CONFIG_HOME, so the sandboxed jj reads this same isolated dir.
+  jjwc="$root/jjwc"; jjxdg="$root/jjxdg"
+  rm -rf "$jjwc" "$jjxdg"; mkdir -p "$jjwc"
+  (
+    set -e
+    export XDG_CONFIG_HOME="$jjxdg" GIT_CONFIG_GLOBAL=/dev/null
+    unset JJ_CONFIG                 # don't let a dev's JJ_CONFIG override the isolated dir
+    cd "$jjwc"
+    jj git init
+    printf 'hello\n' > tracked.txt
+    jj --ignore-working-copy status   # populates any per-repo secure-config metadata
+  ) >/dev/null 2>&1
+  if [ ! -d "$jjwc/.jj" ]; then
+    bad "setup: could not create test jj repo under $jjwc"
+  else
+    export XDG_CONFIG_HOME="$jjxdg"; unset JJ_CONFIG
+    assert_allow_in "$jjwc" "jj status (read-only) runs"   jj --ignore-working-copy status
+    assert_deny_in  "$jjwc" "writing inside .jj is denied"  /bin/sh -c 'echo x > .jj/sandfence_intrusion'
+    unset XDG_CONFIG_HOME
+  fi
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
