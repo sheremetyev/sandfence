@@ -101,6 +101,10 @@ else
   skip "listing ~/.ssh is denied (~/.ssh does not exist)"
 fi
 
+# POSIX semaphores: a denial here breaks every multiprocessing Pool.
+assert_allow "POSIX semaphores (multiprocessing locks) work" \
+  /usr/bin/python3 -c 'import multiprocessing; multiprocessing.Lock()'
+
 echo
 echo "[launch guard]"
 # Launching with the working copy = $HOME (or /) is refused outright — it would

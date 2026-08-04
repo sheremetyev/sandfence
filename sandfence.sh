@@ -211,6 +211,12 @@ IFS= read -r -d '' static_body <<'SBPL' || true
     (ipc-posix-name "apple.shm.notification_center")
     (ipc-posix-name-prefix "apple.cfprefs."))
 
+;; --- POSIX semaphores ------------------------------------------------------
+;; Python multiprocessing sem_open()s a lock per Pool. A semaphore is a counter, not
+;; a file — no data, no path, no persistence; squatting a name is its only power, and
+;; /tmp is already writable. Same grant Apple's App Sandbox gives every App Store app.
+(allow ipc-posix-sem (semaphore-owner self))
+
 ;; NOT granted, on purpose (default-deny covers them): your home directory at
 ;; large, the login Keychain, ~/.ssh, ~/.aws, gh/glab tokens, Docker sockets.
 SBPL
