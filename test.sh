@@ -101,9 +101,12 @@ else
   skip "listing ~/.ssh is denied (~/.ssh does not exist)"
 fi
 
-# POSIX semaphores: a denial here breaks every multiprocessing Pool.
-assert_allow "POSIX semaphores (multiprocessing locks) work" \
-  /usr/bin/python3 -c 'import multiprocessing; multiprocessing.Lock()'
+# POSIX semaphores: a real Pool exercises the parent's create and each child's re-open.
+assert_allow "POSIX semaphores: a multiprocessing Pool round-trips" \
+  /usr/bin/python3 -c 'import multiprocessing as m
+p = m.Pool(2)
+assert p.map(abs, [-1, -2]) == [1, 2]
+p.close(); p.join()'
 
 echo
 echo "[launch guard]"
