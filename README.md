@@ -48,7 +48,7 @@ git clone https://github.com/sheremetyev/sandfence ~/.config/sandfence
 # A short `s` wrapper with the toolchains (and extra paths) you use day to day
 cat > ~/.local/bin/s <<'EOF'
 #!/bin/sh
-exec ~/.config/sandfence/sandfence.sh --rust --node --python "$@"
+exec ~/.config/sandfence/sandfence.sh --brew --rust --node --python "$@"
 EOF
 chmod +x ~/.local/bin/s
 ```
@@ -75,13 +75,17 @@ login Keychain, never your shell environment.
 
 Widen it explicitly: **`-r PATH`** / **`-w PATH`** add a directory or file, and the
 **`--rust` / `--node` / `--python`** presets grant build caches read-write while keeping
-registry tokens and PATH-plant vectors denied. **`--print`** shows exactly what an
+registry tokens and PATH-plant vectors denied; **`--brew`** makes the Homebrew prefix
+readable and runnable but never writable, so `brew install` and system-wide
+`pip install` stay errors. **`--print`** shows exactly what an
 invocation grants; [DESIGN.md](DESIGN.md) explains why each grant is there.
 
 ## Limitations
 
-- **macOS on Apple Silicon**, default toolchains (`rustup`, `nvm` + stock `npm`, Apple
-  `python3`). Homebrew, pyenv, pnpm, and yarn aren't auto-detected — grant them with `-r`/`-w`.
+- **macOS on Apple Silicon**, default toolchains (Homebrew, `rustup`, `nvm` + stock `npm`,
+  Apple `python3`). pyenv, pnpm, and yarn aren't auto-detected — grant them with `-r`/`-w`.
+- `--brew` is read-only wholesale: `brew install`/`upgrade` fail inside by design. Prefer
+  `/opt/homebrew/opt/<formula>` over `brew --prefix <formula>` in build scripts.
 - **`sandbox-exec` is deprecated by Apple (2017) but fully functional** — only the CLI
   is deprecated; the Seatbelt engine under it still powers the macOS App Sandbox and
   Chrome's renderer sandbox, so it isn't going away. A future macOS could change the CLI.

@@ -286,8 +286,43 @@ assert_deny_home "node: ~/.npm/_logs is NOT readable (old tokens)" --node /bin/c
 # --- python ---
 mkdir -p "$fakehome/Library/Caches/pip"
 assert_allow_home "python: pip cache (~/Library/Caches/pip) is writable" --python /bin/sh -c "echo x > '$fakehome/Library/Caches/pip/probe'"
-# --python prepends /usr/bin so python3 resolves to Apple's CLT python, not a brew/pyenv one.
-assert_allow_home "python: python3 resolves under /usr/bin"        --python /bin/sh -c 'case "$(command -v python3)" in /usr/bin/python3) exit 0;; *) exit 1;; esac'
+
+# --- brew ---
+# A FAKE prefix under the test root, selected via HOMEBREW_PREFIX: outside the working copy (so only
+# --brew can reach it) and nothing here touches the real /opt/homebrew. bin/ symlinks into Cellar/.
+fakebrew="$root/fakebrew"
+rm -rf "$fakebrew"
+mkdir -p "$fakebrew/bin" "$fakebrew/Cellar/tool/1.0/bin" "$fakebrew/etc/homebrew" "$fakebrew/var/postgres"
+printf '#!/bin/sh\nexit 0\n' > "$fakebrew/bin/brew"; chmod +x "$fakebrew/bin/brew"   # what marks a REAL prefix
+printf '#!/bin/sh\nexit 0\n' > "$fakebrew/Cellar/tool/1.0/bin/tool"; chmod +x "$fakebrew/Cellar/tool/1.0/bin/tool"
+ln -s ../Cellar/tool/1.0/bin/tool "$fakebrew/bin/tool"
+printf '//registry.npmjs.org/:_authToken=SECRET\n' > "$fakebrew/etc/npmrc"
+printf 'HOMEBREW_GITHUB_API_TOKEN=SECRET\n' > "$fakebrew/etc/homebrew/brew.env"
+printf 'DBSECRET\n' > "$fakebrew/var/postgres/data"
+export HOMEBREW_PREFIX="$fakebrew"   # sf_home / assert_*_home (from [agents]) pass the env through
+
+# Ungranted without the flag; with it, a formula runs through the bin/ symlink into Cellar/.
+assert_deny_home  "brew: prefix is NOT readable without --brew"           /bin/cat "$fakebrew/bin/brew"
+assert_allow_home "brew: a formula runs via its bin/ symlink"              --brew "$fakebrew/bin/tool"
+# The read carve-outs: var/ (service data), etc/homebrew/ (brew.env token), etc/npmrc (registry token).
+assert_deny_home  "brew: var/ (service data) is NOT readable"              --brew /bin/cat "$fakebrew/var/postgres/data"
+assert_deny_home  "brew: etc/homebrew/brew.env (GitHub token) is NOT readable" --brew /bin/cat "$fakebrew/etc/homebrew/brew.env"
+assert_deny_home  "brew: etc/npmrc (registry token) is NOT readable"       --brew /bin/cat "$fakebrew/etc/npmrc"
+# Not writable: bin/ is on PATH (PATH-plant). Content check: the planted file must not appear.
+sf_home --brew /bin/sh -c "echo EVIL > '$fakebrew/bin/planted'" >/dev/null 2>&1
+if [ -e "$fakebrew/bin/planted" ]; then bad "brew: bin/ is NOT writable (no PATH-plant / brew install)"; rm -f "$fakebrew/bin/planted"
+else ok "brew: bin/ is NOT writable (no PATH-plant / brew install)"; fi
+# A HOMEBREW_PREFIX with no bin/brew (here, the fake HOME) must refuse to launch, not grant that tree.
+if ( cd "$wc" && HOME="$fakehome" HOMEBREW_PREFIX="$fakehome" "$SF" --brew /usr/bin/true ) >/dev/null 2>&1; then
+  bad "brew: a HOMEBREW_PREFIX that is not a Homebrew prefix is refused"
+else ok "brew: a HOMEBREW_PREFIX that is not a Homebrew prefix is refused"; fi
+unset HOMEBREW_PREFIX
+# The real default prefix, if present (exercises /opt traversal; bin/brew is a plain script).
+if [ -r /opt/homebrew/bin/brew ]; then
+  assert_allow_in "$wc" "brew: real /opt/homebrew is readable with --brew" --brew /bin/cat /opt/homebrew/bin/brew
+else
+  skip "brew: real /opt/homebrew is readable with --brew (no /opt/homebrew/bin/brew)"
+fi
 
 echo
 echo "[environment]"

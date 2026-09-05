@@ -133,9 +133,8 @@ via `SSL_CERT_FILE` — no Keychain access needed.
 **Apple's `git`/`cc`/`python3` are stubs.** They resolve the real binary through the
 developer-dir selectors under `/private/var/select`, and Apple's `git` stub reads the
 Xcode license plist as a license check — deny it and *every* git operation fails with
-"license not agreed." Both are granted read-only in the baseline. That's also why
-`--python` simply prepends `/usr/bin` to `PATH`: Apple's `python3` needs no extra grants,
-which keeps an ungranted Homebrew/pyenv tree out of the box.
+"license not agreed." Both are granted read-only in the baseline, which is also why
+Apple's `python3` works with no preset at all.
 
 ## The working copy and history
 
@@ -204,12 +203,30 @@ are writable, but registry/publish tokens and PATH-plant vectors stay denied.** 
 land on your PATH), `~/.cargo/credentials.toml` (the crates.io token), and `~/.npmrc`
 (the registry token) do not.
 
-They assume the common layouts — rustup/cargo, nvm, Apple's `python3`. Other toolchains
-(Homebrew, pyenv, fnm, volta, pnpm, yarn) aren't auto-detected on purpose: a preset is a
+`--brew` grants the Homebrew prefix (`$HOMEBREW_PREFIX`, default `/opt/homebrew`)
+read-only wholesale. Because exec is bounded by traversal, that makes every installed
+formula runnable — brew's python, go, node, cmake, openssl, libpq — while `brew install`,
+a `pip install` into the brew python, or `npm -g` fail: system-wide installs are exactly
+the threat. Three reads are carved out after the grant: `var/` (service data and logs —
+postgres, mysql, redis dumps; nothing a toolchain needs), `etc/homebrew/` (brew's own
+config; `brew.env` can hold a GitHub token), and `etc/npmrc` (brew-node's global npm
+config, which can hold a registry token). The rest of `etc/` stays readable
+because openssl, php, and fontconfig keep runtime config there; the known cost is that
+service configs there (`redis.conf`, `mosquitto.conf`, brew git's `gitconfig`) can carry
+passwords or tokens. The prefix must contain `bin/brew` — a sanity check so a stale
+`HOMEBREW_PREFIX` fails loudly, not a boundary.
+
+`--python` grants only the pip cache; the interpreter is whatever `python3` is on PATH —
+Apple's from the baseline, brew's under `--brew`, pyenv's with `-r ~/.pyenv` — and an
+ungranted one fails to exec rather than being silently swapped for Apple's.
+
+They assume the common layouts — Homebrew, rustup/cargo, nvm, Apple's `python3`. Other
+toolchains (pyenv, fnm, volta, pnpm, yarn) aren't auto-detected on purpose: a preset is a
 real grant, and guessing wrong either over-exposes a tree or silently misses one.
 Instead, grant exactly what they need with `-r`/`-w`. This is also where you'd add a new
-preset — copy the shape of an existing `case` branch: grant the cache read-write, then
-`(deny …)` the token/bin/config paths *after* the grant so the denies win.
+preset — copy the shape of an existing `case` branch: grant the narrowest tree that
+works (the cache, not its parent), and only where a sensitive path sits *inside* that
+tree, `(deny …)` it *after* the grant so the deny wins.
 
 ## Widening the surface
 

@@ -9,7 +9,7 @@ set -euo pipefail
 # Denied by default: the rest of $HOME — ~/.ssh, ~/.aws, the login Keychain,
 # ~/.gitconfig credentials. See DESIGN.md for how it works and why each grant exists.
 #
-# Usage:  sandfence.sh [-r PATH]... [-w PATH]... [--rust|--node|--python]
+# Usage:  sandfence.sh [-r PATH]... [-w PATH]... [--brew|--rust|--node|--python]
 #                      [--claude|--codex] [--print] <tool> [args...]
 # ============================================================================
 
@@ -21,6 +21,7 @@ usage() {
     '  --claude   also grant the claude agent bundle (binary + ~/.claude state; auth via file, not Keychain)' \
     '  --codex    also grant the codex agent bundle  (binary + node runtime + ~/.codex state)' \
     '  --rust/--node/--python  toolchain preset: caches writable, registry tokens + PATH-plant denied' \
+    '  --brew     Homebrew prefix read-only ($HOMEBREW_PREFIX, default /opt/homebrew); var/ + brew/npm config denied' \
     '  --print    print the composed SBPL profile and exit (also -p)' \
     '  <tool>     any command on PATH (resolved by sandbox-exec)'
   exit "${1:-1}"
@@ -87,7 +88,7 @@ while [[ $# -gt 0 ]]; do
     -w)  [[ $# -ge 2 ]] || { echo "sandfence.sh: -w needs a path" >&2; exit 1; }; writes+=("$2"); shift 2 ;;
     -w*) writes+=("${1#-w}"); shift ;;
     --claude|--codex) agents+=("${1#--}"); shift ;;
-    --rust|--node|--python) presets+=("${1#--}"); shift ;;
+    --brew|--rust|--node|--python) presets+=("${1#--}"); shift ;;
     -p|--print) print_only=1; shift ;;
     -h|--help)  usage 0 ;;
     --)         shift; break ;;
@@ -306,7 +307,7 @@ for a in "${agents[@]+"${agents[@]}"}"; do
         grant_file "$codex_bin"                               # the codex executable (exec'd only in-sandbox)
         # codex needs its node runtime readable. Auto-grant ONLY the canonical nvm
         # layout, matched positively (a blocklist of shared prefixes is never complete).
-        # Other node managers (brew, fnm, volta): grant the version dir with -r.
+        # Other node managers: brew → --brew; fnm, volta → grant the version dir with -r.
         noderoot="${codex_bin%/bin/codex}"                    # …/<v>/bin/codex → the node version dir
         case "$noderoot" in
           "$HOME"/.nvm/versions/node/*)
@@ -319,13 +320,26 @@ for a in "${agents[@]+"${agents[@]}"}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Toolchain presets (--rust/--node/--python): named bundles of -r/-w grants.
+# Toolchain presets (--brew/--rust/--node/--python): named bundles of -r/-w grants.
 # Caches writable, but registry/publish TOKENS and PATH-plant vectors (bin dirs,
 # build-command config) stay denied. Anything here is also doable by hand with
-# -r/-w. Assumes rustup/cargo, nvm, Apple-python layouts; for brew/pyenv/etc. use -r.
+# -r/-w. Assumes Homebrew, rustup/cargo, nvm, Apple-python layouts; for pyenv/etc. use -r.
 # ---------------------------------------------------------------------------
 for p in "${presets[@]+"${presets[@]}"}"; do
   case "$p" in
+    brew)
+      # Prefix from the launcher's env (brew shellenv sets it), else the Apple Silicon default. It must
+      # hold a real Homebrew (bin/brew) so a stale value fails loudly instead of granting another tree.
+      brew_prefix="${HOMEBREW_PREFIX:-/opt/homebrew}"; brew_prefix="${brew_prefix%/}"
+      validate_path "$brew_prefix" "HOMEBREW_PREFIX"
+      [ -x "$brew_prefix/bin/brew" ] || { echo "sandfence.sh: --brew: no Homebrew at $brew_prefix (set HOMEBREW_PREFIX)" >&2; exit 1; }
+      sect "preset: homebrew (prefix ro; var/, etc/homebrew/, etc/npmrc denied)"
+      grant_ro "$brew_prefix"                 # every formula readable + runnable; nothing writable (no brew/pip/npm -g installs)
+      # Read-denied after the grant (-r re-opens): var/ is service data + logs (postgres, mysql, redis);
+      # etc/homebrew/ is brew's own config (brew.env: HOMEBREW_GITHUB_API_TOKEN); etc/npmrc is brew-node's
+      # global npm config (registry token), like the nvm one under --node.
+      dynamic+="(deny file-read* (subpath \"$brew_prefix/var\") (subpath \"$brew_prefix/etc/homebrew\") (literal \"$brew_prefix/etc/npmrc\"))"$'\n'
+      ;;
     rust)
       sect "preset: rust (toolchains ro; cargo caches rw; bin ro; env/config/token denied)"
       grant_ro "$HOME/.rustup"                # toolchains: rustc, std
@@ -354,11 +368,10 @@ for p in "${presets[@]+"${presets[@]}"}"; do
       export NPM_CONFIG_USERCONFIG="${NPM_CONFIG_USERCONFIG:-/dev/null}"
       ;;
     python)
-      sect "preset: python (pip cache rw; Apple /usr/bin/python3)"
+      sect "preset: python (pip cache rw)"
       grant_rw "$HOME/Library/Caches/pip"     # pip download cache (macOS)
-      # Apple's /usr/bin/python3 (already in the baseline). Prepend /usr/bin so `python3`
-      # resolves to it, not an ungranted brew/pyenv python. For those, grant the prefix with -r.
-      export PATH="/usr/bin:${PATH:-}"
+      # The interpreter is whatever python3 is on PATH: Apple's /usr/bin/python3 is in the baseline,
+      # a brew one needs --brew, pyenv needs -r ~/.pyenv. An ungranted one fails to exec, loudly.
       ;;
   esac
 done
@@ -392,7 +405,7 @@ dynamic+="(allow file-read* (literal \"$xdg_git/ignore\") (literal \"$xdg_git/at
 # available like git, not only inside a jj repo). Read-only config stops a run planting
 # config that fires on a later UNsandboxed jj; .jj in the working copy is write-denied,
 # so read-only jj needs `--ignore-working-copy`. A symlinked/shim install whose target
-# is in an ungranted tree isn't auto-resolved (use -r); cargo/direct installs work.
+# is in an ungranted tree isn't auto-resolved (brew → --brew, else -r); cargo/direct installs work.
 jj_bin="$(command -v jj 2>/dev/null || true)"
 if [[ "$jj_bin" == /* ]]; then                          # jj is installed at an absolute path
   sect "jj: binary (ro) + user config (ro)"
@@ -450,7 +463,7 @@ done
 clean_env=()
 for name in PATH HOME USER LOGNAME SHELL TERM TMPDIR PWD \
             LANG LC_ALL LC_CTYPE TERM_PROGRAM COLORTERM __CF_USER_TEXT_ENCODING \
-            XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL NPM_CONFIG_USERCONFIG; do
+            XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL NPM_CONFIG_USERCONFIG HOMEBREW_PREFIX; do   # HOMEBREW_PREFIX: brew shellenv's, for build scripts
   [ -n "${!name:-}" ] && clean_env+=("$name=${!name}")   # include only vars that are actually set
 done
 
