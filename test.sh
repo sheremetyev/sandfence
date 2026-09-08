@@ -287,6 +287,63 @@ assert_deny_home "node: ~/.npm/_logs is NOT readable (old tokens)" --node /bin/c
 mkdir -p "$fakehome/Library/Caches/pip"
 assert_allow_home "python: pip cache (~/Library/Caches/pip) is writable" --python /bin/sh -c "echo x > '$fakehome/Library/Caches/pip/probe'"
 
+# --- go ---
+# Default layout under the fake HOME (the caller's GOPATH/GOMODCACHE/GOCACHE must not leak in). The
+# caches are NOT pre-created: sandfence must make them at launch (go aborts when it can't).
+unset GOPATH GOMODCACHE GOCACHE
+goenv="$fakehome/Library/Application Support/go/env"
+rm -rf "$fakehome/go" "$fakehome/Library/Caches/go-build" "${goenv%/env}"
+mkdir -p "$fakehome/go/bin" "${goenv%/env}"
+printf '#!/bin/sh\nexit 0\n' > "$fakehome/go/bin/tool"; chmod +x "$fakehome/go/bin/tool"
+printf 'GOPROXY=https://user:SECRET@proxy.example\n' > "$goenv"
+assert_deny_home  "go: ~/go is NOT readable without --go"                          /bin/ls "$fakehome/go/bin"
+assert_allow_home "go: module cache (~/go/pkg/mod) is created + writable"          --go /bin/sh -c "echo x > '$fakehome/go/pkg/mod/probe'"
+assert_allow_home "go: checksum-db state (~/go/pkg/sumdb) is created + writable"   --go /bin/sh -c "echo x > '$fakehome/go/pkg/sumdb/probe'"
+assert_allow_home "go: build cache (~/Library/Caches/go-build) is created + writable" --go /bin/sh -c "echo x > '$fakehome/Library/Caches/go-build/probe'"
+assert_allow_home "go: a tool in ~/go/bin runs"                                    --go "$fakehome/go/bin/tool"
+# Not writable (content-checked): ~/go/bin (PATH-plant), a downloaded toolchain + its zip and a vcs clone's
+# config in the module cache (a later UNsandboxed go runs them), the `go env -w` store (GOFLAGS/CC are commands).
+tc="$fakehome/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.99.darwin-arm64/bin"; vcs="$fakehome/go/pkg/mod/cache/vcs/abc"
+tczip="$fakehome/go/pkg/mod/cache/download/golang.org/toolchain/@v"
+mkdir -p "$tc" "$vcs" "$tczip"; printf 'ORIG\n' > "$tc/go"; printf 'ORIG\n' > "$vcs/config"; printf 'ORIG\n' > "$tczip/v0.0.1-go1.99.darwin-arm64.zip"
+for f in "$fakehome/go/bin/tool" "$tc/go" "$tczip/v0.0.1-go1.99.darwin-arm64.zip" "$vcs/config" "$goenv"; do
+  sf_home --go /bin/sh -c "echo CLOBBER > '$f'" >/dev/null 2>&1
+  if grep -q CLOBBER "$f" 2>/dev/null; then bad "go: NOT writable: ${f#"$fakehome"/}"
+  else ok "go: NOT writable: ${f#"$fakehome"/}"; fi
+done
+assert_deny_home  "go: the go env store is NOT readable (GOPROXY token)"           --go /bin/cat "$goenv"
+assert_deny_home  "go: a vcs clone's config is NOT readable (URL-embedded token)"  --go /bin/cat "$vcs/config"
+# A symlinked GOMODCACHE: the denies must hold on the resolved path (Seatbelt checks resolved paths).
+ln -sfn "$fakehome/go/pkg/mod" "$fakehome/modlink"
+if ( cd "$wc" && HOME="$fakehome" GOMODCACHE="$fakehome/modlink" "$SF" --go /bin/sh -c "echo CLOBBER > '$tc/go'" ) >/dev/null 2>&1 \
+   || grep -q CLOBBER "$tc/go"; then
+  bad "go: a symlinked GOMODCACHE keeps the toolchain write-deny"
+else ok "go: a symlinked GOMODCACHE keeps the toolchain write-deny"; fi
+# A GOMODCACHE in the launcher's env relocates the grant (and reaches go inside); the default is then ungranted.
+if ( cd "$wc" && HOME="$fakehome" GOMODCACHE="$fakehome/altmod" "$SF" --go /bin/sh -c 'echo x > "$GOMODCACHE/probe"' ) >/dev/null 2>&1 \
+   && [ -e "$fakehome/altmod/probe" ]; then
+  ok "go: GOMODCACHE from the env relocates the module cache grant (and is passed through)"
+else bad "go: GOMODCACHE from the env relocates the module cache grant (and is passed through)"; fi
+if ( cd "$wc" && HOME="$fakehome" GOMODCACHE="$fakehome/altmod" "$SF" --go /bin/sh -c "echo CLOBBER > '$fakehome/go/pkg/mod/probe'" ) >/dev/null 2>&1 \
+   || grep -q CLOBBER "$fakehome/go/pkg/mod/probe"; then
+  bad "go: a relocated GOMODCACHE leaves the default ~/go/pkg/mod ungranted"
+else ok "go: a relocated GOMODCACHE leaves the default ~/go/pkg/mod ungranted"; fi
+# A real go, if reachable: a stdlib-only build under the fake HOME (fresh caches, denied env/telemetry
+# store — not yours). Proves GOCACHE works and the denials are silent; module downloads need network.
+case "$(command -v go 2>/dev/null || true)" in
+  /usr/local/go/*)                          goflag="" ;;        # go.dev installer: under the baseline /usr grant
+  "${HOMEBREW_PREFIX:-/opt/homebrew}"/*)    goflag="--brew" ;;  # brew's go (bin/go symlinks within the prefix)
+  *)                                        goflag="skip" ;;    # absent, or a layout (~/sdk, mise) that needs -r
+esac
+if [ "$goflag" != skip ]; then
+  mkdir -p "$wc/gohello"; printf 'package main\nimport "fmt"\nfunc main() { fmt.Println("hi") }\n' > "$wc/gohello/hello.go"
+  goout="$(sf_home $goflag --go go run gohello/hello.go 2>&1)"
+  if [ "$goout" = "hi" ]; then ok "go: a real \`go run\` builds (caches usable; env/telemetry denial is silent)"
+  else bad "go: a real \`go run\` builds (got: $goout)"; fi
+else
+  skip "go: a real \`go run\` builds (no go on PATH under /usr/local/go or the brew prefix)"
+fi
+
 # --- brew ---
 # A FAKE prefix under the test root, selected via HOMEBREW_PREFIX: outside the working copy (so only
 # --brew can reach it) and nothing here touches the real /opt/homebrew. bin/ symlinks into Cellar/.

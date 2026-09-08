@@ -48,7 +48,7 @@ git clone https://github.com/sheremetyev/sandfence ~/.config/sandfence
 # A short `s` wrapper with the toolchains (and extra paths) you use day to day
 cat > ~/.local/bin/s <<'EOF'
 #!/bin/sh
-exec ~/.config/sandfence/sandfence.sh --brew --rust --node --python "$@"
+exec ~/.config/sandfence/sandfence.sh --brew --rust --node --python --go "$@"
 EOF
 chmod +x ~/.local/bin/s
 ```
@@ -74,7 +74,7 @@ login Keychain, never your shell environment.
 | **Denied** | the rest of `$HOME` — `~/.ssh`, `~/.aws`, `gh`/`glab` tokens, the login Keychain, `~/.gitconfig` credentials, other repos |
 
 Widen it explicitly: **`-r PATH`** / **`-w PATH`** add a directory or file, and the
-**`--rust` / `--node` / `--python`** presets grant build caches read-write while keeping
+**`--rust` / `--node` / `--python` / `--go`** presets grant build caches read-write while keeping
 registry tokens and PATH-plant vectors denied; **`--brew`** makes the Homebrew prefix
 readable and runnable but never writable, so `brew install` and system-wide
 `pip install` stay errors. **`--print`** shows exactly what an
@@ -83,9 +83,15 @@ invocation grants; [DESIGN.md](DESIGN.md) explains why each grant is there.
 ## Limitations
 
 - **macOS on Apple Silicon**, default toolchains (Homebrew, `rustup`, `nvm` + stock `npm`,
-  Apple `python3`). pyenv, pnpm, and yarn aren't auto-detected — grant them with `-r`/`-w`.
+  Apple `python3`, Go from go.dev or brew). pyenv, pnpm, yarn, and `~/sdk` Go toolchains
+  aren't auto-detected — grant them with `-r`/`-w` (linters' caches too, e.g.
+  `-w ~/Library/Caches/golangci-lint`).
 - `--brew` is read-only wholesale: `brew install`/`upgrade` fail inside by design. Prefer
   `/opt/homebrew/opt/<formula>` over `brew --prefix <formula>` in build scripts.
+- `--go`: `go install` into `~/go/bin` fails by design (`go run pkg@version` instead); your
+  `go env -w` settings and `GO*` shell variables (except the cache paths) don't apply
+  inside; and fetches that bypass the module proxy
+  (`GOPROXY=direct`, private modules, a newer Go via `GOTOOLCHAIN`) fail — run them outside once.
 - **`sandbox-exec` is deprecated by Apple (2017) but fully functional** — only the CLI
   is deprecated; the Seatbelt engine under it still powers the macOS App Sandbox and
   Chrome's renderer sandbox, so it isn't going away. A future macOS could change the CLI.

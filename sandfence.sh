@@ -9,7 +9,7 @@ set -euo pipefail
 # Denied by default: the rest of $HOME — ~/.ssh, ~/.aws, the login Keychain,
 # ~/.gitconfig credentials. See DESIGN.md for how it works and why each grant exists.
 #
-# Usage:  sandfence.sh [-r PATH]... [-w PATH]... [--brew|--rust|--node|--python]
+# Usage:  sandfence.sh [-r PATH]... [-w PATH]... [--brew|--rust|--node|--python|--go]
 #                      [--claude|--codex] [--print] <tool> [args...]
 # ============================================================================
 
@@ -20,7 +20,7 @@ usage() {
     '  -w PATH    read-write access to a dir or file  (repeatable; a dir keeps its .git/.jj read-only)' \
     '  --claude   also grant the claude agent bundle (binary + ~/.claude state; auth via file, not Keychain)' \
     '  --codex    also grant the codex agent bundle  (binary + node runtime + ~/.codex state)' \
-    '  --rust/--node/--python  toolchain preset: caches writable, registry tokens + PATH-plant denied' \
+    '  --rust/--node/--python/--go  toolchain preset: caches writable, registry tokens + PATH-plant denied' \
     '  --brew     Homebrew prefix read-only ($HOMEBREW_PREFIX, default /opt/homebrew); var/ + brew/npm config denied' \
     '  --print    print the composed SBPL profile and exit (also -p)' \
     '  <tool>     any command on PATH (resolved by sandbox-exec)'
@@ -39,6 +39,7 @@ validate_path() {             # <path> <label> — require an absolute, SBPL-saf
   fi
 }
 resolve_dir() { cd "$1" 2>/dev/null && pwd -P; }   # canonicalize a dir (resolve symlinks)
+canon_dir()   { [ -n "$1" ] && resolve_dir "$1" || printf '%s' "${1%/}"; }   # …if it exists, else as given; never cd "" (= cwd)
 
 # A (subpath ...) grant does NOT confer the right to traverse the path's parents,
 # so each granted root needs lookup-only (metadata) literals up its chain — enough
@@ -88,7 +89,7 @@ while [[ $# -gt 0 ]]; do
     -w)  [[ $# -ge 2 ]] || { echo "sandfence.sh: -w needs a path" >&2; exit 1; }; writes+=("$2"); shift 2 ;;
     -w*) writes+=("${1#-w}"); shift ;;
     --claude|--codex) agents+=("${1#--}"); shift ;;
-    --brew|--rust|--node|--python) presets+=("${1#--}"); shift ;;
+    --brew|--rust|--node|--python|--go) presets+=("${1#--}"); shift ;;
     -p|--print) print_only=1; shift ;;
     -h|--help)  usage 0 ;;
     --)         shift; break ;;
@@ -320,10 +321,10 @@ for a in "${agents[@]+"${agents[@]}"}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Toolchain presets (--brew/--rust/--node/--python): named bundles of -r/-w grants.
+# Toolchain presets (--brew/--rust/--node/--python/--go): named bundles of -r/-w grants.
 # Caches writable, but registry/publish TOKENS and PATH-plant vectors (bin dirs,
 # build-command config) stay denied. Anything here is also doable by hand with
-# -r/-w. Assumes Homebrew, rustup/cargo, nvm, Apple-python layouts; for pyenv/etc. use -r.
+# -r/-w. Assumes Homebrew, rustup/cargo, nvm, Apple-python, default-go layouts; for pyenv/etc. use -r.
 # ---------------------------------------------------------------------------
 for p in "${presets[@]+"${presets[@]}"}"; do
   case "$p" in
@@ -372,6 +373,27 @@ for p in "${presets[@]+"${presets[@]}"}"; do
       grant_rw "$HOME/Library/Caches/pip"     # pip download cache (macOS)
       # The interpreter is whatever python3 is on PATH: Apple's /usr/bin/python3 is in the baseline,
       # a brew one needs --brew, pyenv needs -r ~/.pyenv. An ungranted one fails to exec, loudly.
+      ;;
+    go)
+      # Caches: the launcher's env (first GOPATH entry) or go's macOS defaults, canonicalized when they exist
+      # (the denies below check resolved paths) and exported so go inside uses what's granted. Toolchain:
+      # whatever go is on PATH (/usr/local/go is in the baseline; brew's → --brew).
+      gopath="${GOPATH:-$HOME/go}"; gopath="$(canon_dir "${gopath%%:*}")"; gopath="${gopath:-$HOME/go}"
+      gomodcache="$(canon_dir "${GOMODCACHE:-$gopath/pkg/mod}")"
+      gocache="$(canon_dir "${GOCACHE:-$HOME/Library/Caches/go-build}")"
+      export GOPATH="$gopath" GOMODCACHE="$gomodcache" GOCACHE="$gocache"
+      sect "preset: go (caches rw; GOPATH/bin ro; downloaded toolchains write-denied; vcs clones denied)"
+      grant_rw "$gomodcache"                  # modules
+      grant_rw "$gopath/pkg/sumdb"            # checksum-db state
+      grant_rw "$gocache"                     # build cache (go aborts without it; all three created after --print)
+      grant_ro "$gopath/bin"                  # tools run; `go install` into it (a PATH dir) fails
+      # Carved out of the module cache: auto-downloaded toolchains are write-denied (a later UNsandboxed go
+      # execs them); cache/vcs/ clones are denied outright (git config there can name a command or hold a
+      # URL-embedded token). So fetch a newer Go / GOPROXY=direct outside.
+      dynamic+="(deny file-write* (prefix \"$gomodcache/golang.org/toolchain@\") (subpath \"$gomodcache/cache/download/golang.org/toolchain\"))"$'\n'
+      dynamic+="(deny file-read* file-write* (subpath \"$gomodcache/cache/vcs\"))"$'\n'
+      # NOT granted: the `go env -w` store, ~/Library/Application Support/go/env (GOPROXY can embed a token;
+      # GOFLAGS/CC are commands). go treats it as absent; -r it to keep yours. Telemetry dir: skipped silently.
       ;;
   esac
 done
@@ -455,6 +477,8 @@ for a in "${agents[@]+"${agents[@]}"}"; do
     codex)  mkdir -p "$HOME/.codex"  2>/dev/null || true ;;
   esac
 done
+# --go caches: go aborts if it can't create them, and their parents aren't writable inside.
+[ -n "${gocache:-}" ] && { mkdir -p "$gopath/pkg/sumdb" "$gomodcache" "$gocache" 2>/dev/null || true; }
 
 # Run with an ALLOWLISTED environment, not the caller's full env: env vars are inherited
 # regardless of the profile, so ambient secrets (AWS_*, GITHUB_TOKEN, OPENAI_API_KEY,
@@ -463,7 +487,8 @@ done
 clean_env=()
 for name in PATH HOME USER LOGNAME SHELL TERM TMPDIR PWD \
             LANG LC_ALL LC_CTYPE TERM_PROGRAM COLORTERM __CF_USER_TEXT_ENCODING \
-            XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL NPM_CONFIG_USERCONFIG HOMEBREW_PREFIX; do   # HOMEBREW_PREFIX: brew shellenv's, for build scripts
+            XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL NPM_CONFIG_USERCONFIG \
+            HOMEBREW_PREFIX GOPATH GOMODCACHE GOCACHE; do   # brew shellenv's prefix (for build scripts); --go's cache locations
   [ -n "${!name:-}" ] && clean_env+=("$name=${!name}")   # include only vars that are actually set
 done
 

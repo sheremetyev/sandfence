@@ -196,7 +196,7 @@ agent inside the other; by default each tool gets only its own bundle.
 
 ## Toolchain presets
 
-`--rust`/`--node`/`--python` are nothing more than named bundles of the same `-r`/`-w`
+`--rust`/`--node`/`--python`/`--go` are nothing more than named bundles of the same `-r`/`-w`
 grants you could pass by hand. The principle is consistent throughout: **build caches
 are writable, but registry/publish tokens and PATH-plant vectors stay denied.** So
 `cargo build` and `npm install` work, while `~/.cargo/bin` (a binary planted there would
@@ -220,7 +220,26 @@ passwords or tokens. The prefix must contain `bin/brew` — a sanity check so a 
 Apple's from the baseline, brew's under `--brew`, pyenv's with `-r ~/.pyenv` — and an
 ungranted one fails to exec rather than being silently swapped for Apple's.
 
-They assume the common layouts — Homebrew, rustup/cargo, nvm, Apple's `python3`. Other
+`--go` follows the same split: the module cache (`~/go/pkg/mod`), checksum-database
+state (`~/go/pkg/sumdb`) and build cache (`~/Library/Caches/go-build`) read-write,
+`~/go/bin` read-only — installed tools run, but `go install` into it, a PATH dir, fails.
+Two things are carved out of the module cache after the grant: auto-downloaded
+toolchains (`golang.org/toolchain@…` and their zips) are write-denied because a later
+unsandboxed `go` execs them — fetch a newer Go outside; `cache/vcs/` clones are denied
+outright, since their git config can name a command (`core.sshCommand`) or keep a
+URL-embedded token. So `GOPROXY=direct` fetches fail inside, while the default proxy
+serves public modules. Module sources themselves stay writable — the
+cache-poisoning risk every writable cache carries, as with `~/.cargo/registry`. The
+`go env -w` store (`~/Library/Application Support/go/env`) stays denied: `GOPROXY` there
+can embed a token, and `GOFLAGS`/`CC` are commands; go treats it as absent, `-r` it to
+keep yours. `GOPATH`/`GOMODCACHE`/`GOCACHE` come from your environment (else go's
+defaults) and are pinned in the sandbox's, so go uses exactly what was granted; the
+caches are created at launch, because go aborts when it can't create `GOCACHE` and their
+parents aren't writable inside. The toolchain is whatever `go` is on PATH: the go.dev
+installer's `/usr/local/go` is in the baseline, brew's needs `--brew`.
+
+They assume the common layouts — Homebrew, rustup/cargo, nvm, Apple's `python3`, go's
+default `GOPATH`. Other
 toolchains (pyenv, fnm, volta, pnpm, yarn) aren't auto-detected on purpose: a preset is a
 real grant, and guessing wrong either over-exposes a tree or silently misses one.
 Instead, grant exactly what they need with `-r`/`-w`. This is also where you'd add a new
