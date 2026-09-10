@@ -228,11 +228,29 @@ resolves through inside; it is granted read-only and its directory is write-deni
 (older fnm keeps it under `$TMPDIR`, which is writable wholesale), because re-pointing it
 would switch the *launching* shell's node to whatever the agent planted. So `fnm use`
 fails inside and the version is whatever your shell had. `~/.npmrc` and the `-g` homes stay denied; npm's user config is
-pointed at an empty file so it neither reads the token nor crashes. Corepack's home
+pointed at a launch-written file (holding only pnpm's `store-dir`, below) so it neither
+reads the token nor crashes. Corepack's home
 (`COREPACK_HOME`, default `~/.cache/node/corepack`, pinned in the environment) is read-only
 for the same reason as the go toolchain cache: a later unsandboxed shim execs whatever sits
 there. Cached package managers run; fetching one fails until you `corepack prepare` it
-outside.
+outside. pnpm follows the same split: its home (`PNPM_HOME`, default `~/Library/pnpm`,
+pinned in the environment) is read-only, since it holds `bin/` and `global/` (on PATH) and
+the pnpm and Node versions pnpm fetches for itself; the store inside it and the cache
+(`~/Library/Caches/pnpm`) are read-write and created at launch. The store is also pinned
+(`store-dir`: as `pnpm_config_store_dir` for pnpm ≥11, and in the launch-written npm user
+config above for ≤10, which doesn't read the env spelling — and npm ≥11 warns about it on
+every command): without an explicit one, pnpm probes hard-linking into its read-only home
+and, when that fails, silently builds a shadow store inside the project instead of
+erroring. The `dlx/` cache is
+write-denied: a later unsandboxed `pnpm dlx` execs what
+sits there, so `dlx` can't fetch or refresh inside (a still-valid cached entry runs) and the
+agent uses installed dependencies. Global config
+(`~/Library/Preferences/pnpm`) stays denied: its `rc` holds registry tokens and
+`config.yaml` can name commands (`npmPath`, `scriptShell`). One residual is accepted: your
+global pnpm tools resolve into `<store>/links`, which stays writable because every
+`pnpm install` on macOS materializes packages there — the same class of writable cache as
+`~/.cargo/registry`. Nothing reaches it by accident: with pnpm's default clone imports,
+`node_modules` shares no inodes with the store, so edits in the working copy don't touch it.
 
 `--python` grants only the pip cache; the interpreter is whatever `python3` is on PATH —
 Apple's from the baseline, brew's under `--brew`, pyenv's with `-r ~/.pyenv` — and an
@@ -258,7 +276,7 @@ installer's `/usr/local/go` is in the baseline, brew's needs `--brew`.
 
 They assume the common layouts — Homebrew, rustup/cargo, nvm/fnm, Apple's `python3`, go's
 default `GOPATH`. Other
-toolchains (pyenv, volta, pnpm, yarn) aren't auto-detected on purpose: a preset is a
+toolchains (pyenv, volta, yarn) aren't auto-detected on purpose: a preset is a
 real grant, and guessing wrong either over-exposes a tree or silently misses one.
 Instead, grant exactly what they need with `-r`/`-w`. This is also where you'd add a new
 preset — copy the shape of an existing `case` branch: grant the narrowest tree that

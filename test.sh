@@ -333,6 +333,31 @@ COREPACK_HOME="$cpalt" assert_allow_home "node: COREPACK_HOME from the env is gr
 COREPACK_HOME="$cpalt" assert_deny_home  "node: with COREPACK_HOME set, the default home is NOT granted" --node /bin/cat "$cph/v1/pnpm/9/marker"
 unset COREPACK_HOME
 
+# --- node: pnpm ---
+# Home (~/Library/pnpm) is read-only — bin/, global/ and self-fetched versions can't be planted — while
+# the store inside it and the cache are created + writable, minus the dlx cache; global config denied.
+unset PNPM_HOME
+ph="$fakehome/Library/pnpm"; pc="$fakehome/Library/Caches/pnpm"; rm -rf "$ph" "$pc"
+mkdir -p "$ph/bin" "$fakehome/Library/Preferences/pnpm"
+printf '#!/bin/sh\nexit 0\n' > "$ph/pnpm"; chmod +x "$ph/pnpm"
+printf '//registry.npmjs.org/:_authToken=SECRET\n' > "$fakehome/Library/Preferences/pnpm/rc"
+assert_allow_home "node: pnpm store (~/Library/pnpm/store) is created + writable"   --node /bin/sh -c "echo x > '$ph/store/probe'"
+assert_allow_home "node: pnpm cache (~/Library/Caches/pnpm) is created + writable"  --node /bin/sh -c "echo x > '$pc/probe'"
+assert_allow_home "node: the standalone pnpm binary is readable"                   --node /bin/cat "$ph/pnpm"
+assert_allow_home "node: PNPM_HOME is pinned to the granted home inside"           --node /bin/sh -c "[ \"\$PNPM_HOME\" = '$ph' ]"
+assert_allow_home "node: pnpm store dir is pinned inside (env for pnpm >=11, npm user config for <=10)" --node /bin/sh -c "[ \"\$pnpm_config_store_dir\" = '$ph/store' ] && grep -qx 'store-dir=$ph/store' \"\$NPM_CONFIG_USERCONFIG\""
+sf_home --node /bin/sh -c "echo EVIL > '$ph/bin/planted'" >/dev/null 2>&1
+if [ -e "$ph/bin/planted" ]; then bad "node: pnpm bin dir is NOT writable (no PATH-plant)"; rm -f "$ph/bin/planted"
+else ok "node: pnpm bin dir is NOT writable (no PATH-plant)"; fi
+sf_home --node /bin/sh -c "mkdir -p '$pc/dlx/h' && echo EVIL > '$pc/dlx/h/planted'" >/dev/null 2>&1
+if [ -e "$pc/dlx" ]; then bad "node: pnpm dlx cache is NOT writable (a later unsandboxed dlx execs it)"; rm -rf "$pc/dlx"
+else ok "node: pnpm dlx cache is NOT writable (a later unsandboxed dlx execs it)"; fi
+assert_deny_home  "node: pnpm global config (registry token) is NOT readable"      --node /bin/cat "$fakehome/Library/Preferences/pnpm/rc"
+phalt="$fakehome/pnpm-alt"; mkdir -p "$phalt"
+PNPM_HOME="$phalt" assert_allow_home "node: PNPM_HOME from the env: its store is created + writable" --node /bin/sh -c "echo x > '$phalt/store/probe'"
+PNPM_HOME="$phalt" assert_deny_home  "node: with PNPM_HOME set, the default home is NOT granted"    --node /bin/cat "$ph/pnpm"
+unset PNPM_HOME
+
 # --- python ---
 mkdir -p "$fakehome/Library/Caches/pip"
 assert_allow_home "python: pip cache (~/Library/Caches/pip) is writable" --python /bin/sh -c "echo x > '$fakehome/Library/Caches/pip/probe'"

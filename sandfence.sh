@@ -354,7 +354,7 @@ for p in "${presets[@]+"${presets[@]}"}"; do
       dynamic+="(deny file-read* file-write* (literal \"$HOME/.cargo/config\") (literal \"$HOME/.cargo/config.toml\") (literal \"$HOME/.cargo/credentials.toml\") (literal \"$HOME/.cargo/credentials\"))"$'\n'
       ;;
     node)
-      sect "preset: node/npm (nvm + fnm + corepack ro; npm cache rw; config + registry token denied)"
+      sect "preset: node/npm (nvm + fnm + corepack + pnpm home ro; npm/pnpm caches rw; config + registry token denied)"
       grant_ro "$HOME/.nvm"                   # nvm: node versions + nvm itself
       grant_rw "$HOME/.npm"                   # npm cache
       dynamic+="(deny file-read* (subpath \"$HOME/.npm/_logs\"))"$'\n'   # logs can hold old tokens; writes still allowed
@@ -390,12 +390,28 @@ for p in "${presets[@]+"${presets[@]}"}"; do
       corepack_home="$(canon_dir "${COREPACK_HOME:-$HOME/.cache/node/corepack}")"
       export COREPACK_HOME="$corepack_home"
       grant_ro "$corepack_home"
+      # pnpm: home read-only (bin/ + global/ are on PATH; self-fetched pnpm/node versions there run
+      # later UNsandboxed), pinned in the env; the store inside it + the cache read-write (created at
+      # launch, below), minus the dlx cache (a later UNsandboxed `pnpm dlx` execs it — so dlx can't
+      # fetch inside; use installed deps). The store is pinned too: without an explicit store-dir pnpm
+      # probes hard-linking into its read-only home and silently falls back to a shadow store inside
+      # the project. pnpm ≥11 reads pnpm_config_*; ≤10 reads npm's user config (written at launch,
+      # below — npm ≥11 warns about unknown npm_config_* env vars on every command).
+      # Global config (~/Library/Preferences/pnpm: registry token, npmPath/scriptShell) stays denied.
+      pnpm_home="$(canon_dir "${PNPM_HOME:-$HOME/Library/pnpm}")"
+      export PNPM_HOME="$pnpm_home"
+      pnpm_store="$(canon_dir "$pnpm_home/store")"; pnpm_cache="$HOME/Library/Caches/pnpm"
+      export pnpm_config_store_dir="$pnpm_store"
+      grant_ro "$pnpm_home"
+      grant_rw "$pnpm_store"
+      grant_rw "$pnpm_cache"
+      dynamic+="(deny file-write* (subpath \"$pnpm_cache/dlx\"))"$'\n'
       # NOT granted (default-deny): ~/.npmrc + the global config/bin homes — they hold the
-      # registry token and -g install bins. Point npm's USER config at an empty file so it
-      # neither reads your token nor EPERM-crashes. Stock npm only; for pnpm/yarn grant their
-      # store with -w. Private registry / other node managers (volta, brew → --brew): -r <path>
-      # (and set NPM_CONFIG_USERCONFIG to it). See DESIGN.md ("Toolchain presets").
-      export NPM_CONFIG_USERCONFIG="${NPM_CONFIG_USERCONFIG:-/dev/null}"
+      # registry token and -g install bins. Point npm's USER config at a launch-written file holding
+      # only pnpm's store-dir, so it neither reads your token nor EPERM-crashes. yarn: grant its cache
+      # with -w. Private registry / other node managers (volta, brew → --brew): -r <path> (and set
+      # NPM_CONFIG_USERCONFIG to it, adding store-dir=<PNPM_HOME>/store for pnpm ≤10). See DESIGN.md.
+      export NPM_CONFIG_USERCONFIG="${NPM_CONFIG_USERCONFIG:-$pnpm_cache/npmrc}"
       ;;
     python)
       sect "preset: python (pip cache rw)"
@@ -508,6 +524,10 @@ for a in "${agents[@]+"${agents[@]}"}"; do
 done
 # --go caches: go aborts if it can't create them, and their parents aren't writable inside.
 [ -n "${gocache:-}" ] && { mkdir -p "$gopath/pkg/sumdb" "$gomodcache" "$gocache" 2>/dev/null || true; }
+# --node: pnpm's store + cache — their parents aren't writable inside (a corepack-only user has no ~/Library/pnpm) —
+# and npm's user config carrying the store-dir for pnpm ≤10 (see the preset).
+[ -n "${pnpm_store:-}" ] && { mkdir -p "$pnpm_store" "$pnpm_cache" 2>/dev/null || true; }
+[ "${NPM_CONFIG_USERCONFIG:-}" = "${pnpm_cache:-}/npmrc" ] && { printf 'store-dir=%s\n' "$pnpm_store" > "$NPM_CONFIG_USERCONFIG" 2>/dev/null || true; }
 
 # Run with an ALLOWLISTED environment, not the caller's full env: env vars are inherited
 # regardless of the profile, so ambient secrets (AWS_*, GITHUB_TOKEN, OPENAI_API_KEY,
@@ -519,9 +539,10 @@ for name in PATH HOME USER LOGNAME SHELL TERM TMPDIR PWD \
             XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL NPM_CONFIG_USERCONFIG \
             HOMEBREW_PREFIX GOPATH GOMODCACHE GOCACHE \
             FNM_DIR FNM_MULTISHELL_PATH FNM_VERSION_FILE_STRATEGY FNM_RESOLVE_ENGINES \
-            FNM_COREPACK_ENABLED FNM_ARCH FNM_LOGLEVEL COREPACK_HOME; do   # brew shellenv's prefix; --go caches; --node's
-                                                            # fnm dir + `fnm env` settings (not the dist mirror: a URL can
-                                                            # embed a token) + corepack home
+            FNM_COREPACK_ENABLED FNM_ARCH FNM_LOGLEVEL COREPACK_HOME PNPM_HOME \
+            pnpm_config_store_dir; do                       # brew shellenv's prefix; --go caches;
+                                                            # --node's fnm dir + `fnm env` settings (not the dist mirror: a URL
+                                                            # can embed a token) + corepack/pnpm homes + pnpm's store
   [ -n "${!name:-}" ] && clean_env+=("$name=${!name}")   # include only vars that are actually set
 done
 
