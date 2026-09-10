@@ -283,6 +283,41 @@ mkdir -p "$fakehome/.npm/_logs"
 printf '//registry.npmjs.org/:_authToken=SECRET\n' > "$fakehome/.npm/_logs/leak.log"
 assert_deny_home "node: ~/.npm/_logs is NOT readable (old tokens)" --node /bin/cat "$fakehome/.npm/_logs/leak.log"
 
+# --- node: fnm ---
+# The data dir (auto-detected at ~/.local/share/fnm) is read-only with its per-version npmrc denied; the
+# multishell link `fnm env` puts on PATH resolves through read-only, only when the env names it.
+unset FNM_DIR FNM_MULTISHELL_PATH
+fnmdir="$fakehome/.local/share/fnm"; fnminst="$fnmdir/node-versions/v99.0.0/installation"
+fnmlink="$fakehome/.local/state/fnm_multishells/1_2"
+mkdir -p "$fnminst/bin" "$fnminst/etc" "${fnmlink%/*}"
+printf 'FNMLIB\n' > "$fnminst/marker"
+printf '//registry.npmjs.org/:_authToken=SECRET\n' > "$fnminst/etc/npmrc"
+ln -sfn "$fnminst" "$fnmlink"
+assert_allow_home "node: fnm data dir (~/.local/share/fnm) is readable"                  --node /bin/cat "$fnminst/marker"
+assert_deny_home  "node: fnm per-version global npmrc is NOT readable (registry token)"  --node /bin/cat "$fnminst/etc/npmrc"
+sf_home --node /bin/sh -c "echo EVIL > '$fnminst/bin/planted'" >/dev/null 2>&1
+if [ -e "$fnminst/bin/planted" ]; then bad "node: fnm data dir is NOT writable (no fnm install / -g plant)"; rm -f "$fnminst/bin/planted"
+else ok "node: fnm data dir is NOT writable (no fnm install / -g plant)"; fi
+assert_deny_home  "node: fnm multishell link is NOT reachable unless FNM_MULTISHELL_PATH names it" --node /bin/cat "$fnmlink/marker"
+FNM_MULTISHELL_PATH="$fnmlink" assert_allow_home "node: fnm multishell link (FNM_MULTISHELL_PATH) resolves read-only" --node /bin/cat "$fnmlink/marker"
+FNM_MULTISHELL_PATH="$fnmlink" sf_home --node /bin/ln -sfn "$fakehome/.npm" "$fnmlink" >/dev/null 2>&1
+if [ "$(readlink "$fnmlink")" = "$fnminst" ]; then ok "node: fnm multishell link is NOT re-pointable from inside (no fnm use)"
+else bad "node: fnm multishell link is NOT re-pointable from inside (no fnm use)"; ln -sfn "$fnminst" "$fnmlink"; fi
+# …even when the link sits in a writable tree named through a symlinked parent (older fnm uses $TMPDIR,
+# i.e. /var → /private/var; here ~/.npm behind an alias stands in for it). The rules must land on the
+# resolved dir, so probe via the real path — the alias itself is ungranted here (/var is, in the baseline).
+fnmlink2="$fakehome/.npm/fnm_multishells/3_4"; mkdir -p "${fnmlink2%/*}"; ln -sfn "$fnminst" "$fnmlink2"
+ln -sfn "$fakehome/.npm" "$fakehome/npm-alias"; fnmlink2_alias="$fakehome/npm-alias/fnm_multishells/3_4"
+FNM_MULTISHELL_PATH="$fnmlink2_alias" assert_allow_home "node: fnm multishell link in a writable tree still resolves" --node /bin/cat "$fnmlink2/marker"
+FNM_MULTISHELL_PATH="$fnmlink2_alias" sf_home --node /bin/sh -c "ln -sfn '$fakehome/.npm' '$fnmlink2' || { rm -rf '${fnmlink2%/*}' && ln -sfn '$fakehome/.npm' '$fnmlink2'; }" >/dev/null 2>&1
+if [ "$(readlink "$fnmlink2")" = "$fnminst" ]; then ok "node: fnm multishell link in a writable tree is NOT re-pointable from inside"
+else bad "node: fnm multishell link in a writable tree is NOT re-pointable from inside"; fi
+# FNM_DIR from the env wins over the defaults
+fnmalt="$fakehome/fnm-alt"; mkdir -p "$fnmalt/node-versions"; printf 'ALT\n' > "$fnmalt/marker"
+FNM_DIR="$fnmalt" assert_allow_home "node: FNM_DIR from the env is granted read-only" --node /bin/cat "$fnmalt/marker"
+FNM_DIR="$fnmalt" assert_deny_home  "node: with FNM_DIR set, the default fnm dir is NOT granted" --node /bin/cat "$fnminst/marker"
+unset FNM_DIR FNM_MULTISHELL_PATH
+
 # --- python ---
 mkdir -p "$fakehome/Library/Caches/pip"
 assert_allow_home "python: pip cache (~/Library/Caches/pip) is writable" --python /bin/sh -c "echo x > '$fakehome/Library/Caches/pip/probe'"

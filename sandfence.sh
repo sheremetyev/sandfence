@@ -308,7 +308,7 @@ for a in "${agents[@]+"${agents[@]}"}"; do
         grant_file "$codex_bin"                               # the codex executable (exec'd only in-sandbox)
         # codex needs its node runtime readable. Auto-grant ONLY the canonical nvm
         # layout, matched positively (a blocklist of shared prefixes is never complete).
-        # Other node managers: brew → --brew; fnm, volta → grant the version dir with -r.
+        # Other node managers: brew → --brew; fnm → --node; volta → grant the version dir with -r.
         noderoot="${codex_bin%/bin/codex}"                    # …/<v>/bin/codex → the node version dir
         case "$noderoot" in
           "$HOME"/.nvm/versions/node/*)
@@ -324,7 +324,7 @@ done
 # Toolchain presets (--brew/--rust/--node/--python/--go): named bundles of -r/-w grants.
 # Caches writable, but registry/publish TOKENS and PATH-plant vectors (bin dirs,
 # build-command config) stay denied. Anything here is also doable by hand with
-# -r/-w. Assumes Homebrew, rustup/cargo, nvm, Apple-python, default-go layouts; for pyenv/etc. use -r.
+# -r/-w. Assumes Homebrew, rustup/cargo, nvm/fnm, Apple-python, default-go layouts; for pyenv/etc. use -r.
 # ---------------------------------------------------------------------------
 for p in "${presets[@]+"${presets[@]}"}"; do
   case "$p" in
@@ -354,18 +354,41 @@ for p in "${presets[@]+"${presets[@]}"}"; do
       dynamic+="(deny file-read* file-write* (literal \"$HOME/.cargo/config\") (literal \"$HOME/.cargo/config.toml\") (literal \"$HOME/.cargo/credentials.toml\") (literal \"$HOME/.cargo/credentials\"))"$'\n'
       ;;
     node)
-      sect "preset: node/npm (nvm ro; npm cache rw; config + registry token denied)"
-      grant_ro "$HOME/.nvm"                   # node versions + nvm
+      sect "preset: node/npm (nvm + fnm ro; npm cache rw; config + registry token denied)"
+      grant_ro "$HOME/.nvm"                   # nvm: node versions + nvm itself
       grant_rw "$HOME/.npm"                   # npm cache
       dynamic+="(deny file-read* (subpath \"$HOME/.npm/_logs\"))"$'\n'   # logs can hold old tokens; writes still allowed
       for nr in "$HOME"/.nvm/versions/node/*/etc/npmrc; do   # each version's global npmrc can hold a registry token
-        [ -e "$nr" ] && dynamic+="(deny file-read* (literal \"$nr\"))"$'\n'
+        [ -e "$nr" ] && { validate_path "$nr" grant; dynamic+="(deny file-read* (literal \"$nr\"))"$'\n'; }
       done
+      # fnm: FNM_DIR from the env (`fnm env` exports it), else fnm's default locations. Read-only like
+      # ~/.nvm (fnm install / npm -g would plant a binary a later UNsandboxed shell execs); pinned in
+      # the env so fnm inside uses the granted tree.
+      fnm_dir="$(canon_dir "${FNM_DIR:-}")"
+      [ -n "$fnm_dir" ] || for d in "$HOME/.local/share/fnm" "$HOME/.fnm" "$HOME/Library/Application Support/fnm"; do
+        [ -d "$d" ] && { fnm_dir="$(canon_dir "$d")"; break; }
+      done
+      if [[ -n "$fnm_dir" ]]; then
+        export FNM_DIR="$fnm_dir"
+        grant_ro "$fnm_dir"
+        for nr in "$fnm_dir"/node-versions/*/installation/etc/npmrc; do   # per-version global npmrc: registry token
+          [ -e "$nr" ] && { validate_path "$nr" grant; dynamic+="(deny file-read* (literal \"$nr\"))"$'\n'; }
+        done
+        # `fnm env` puts $FNM_MULTISHELL_PATH/bin on PATH: a per-shell symlink to one version. Readable, so
+        # node resolves through it; its dir is write-denied (older fnm keeps it under $TMPDIR, granted rw)
+        # so `fnm use` can't re-point the LAUNCHING shell's node at a planted binary. Parent canonicalized
+        # (Seatbelt matches resolved paths; $TMPDIR goes through /var → /private/var), the link itself kept.
+        ms=""; case "${FNM_MULTISHELL_PATH:-}" in /*) ms="$(resolve_file "$FNM_MULTISHELL_PATH" || true)" ;; esac
+        if [[ "$ms" == /*/* ]]; then
+          grant_file "$ms"
+          dynamic+="(deny file-write* (subpath \"${ms%/*}\") (literal \"${ms%/*}\"))"$'\n'
+        fi
+      fi
       # NOT granted (default-deny): ~/.npmrc + the global config/bin homes — they hold the
       # registry token and -g install bins. Point npm's USER config at an empty file so it
       # neither reads your token nor EPERM-crashes. Stock npm only; for pnpm/yarn grant their
-      # store with -w. Private registry / non-nvm node: -r <path> (and set NPM_CONFIG_USERCONFIG
-      # to it). See DESIGN.md ("Toolchain presets").
+      # store with -w. Private registry / other node managers (volta, brew → --brew): -r <path>
+      # (and set NPM_CONFIG_USERCONFIG to it). See DESIGN.md ("Toolchain presets").
       export NPM_CONFIG_USERCONFIG="${NPM_CONFIG_USERCONFIG:-/dev/null}"
       ;;
     python)
@@ -488,7 +511,10 @@ clean_env=()
 for name in PATH HOME USER LOGNAME SHELL TERM TMPDIR PWD \
             LANG LC_ALL LC_CTYPE TERM_PROGRAM COLORTERM __CF_USER_TEXT_ENCODING \
             XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL NPM_CONFIG_USERCONFIG \
-            HOMEBREW_PREFIX GOPATH GOMODCACHE GOCACHE; do   # brew shellenv's prefix (for build scripts); --go's cache locations
+            HOMEBREW_PREFIX GOPATH GOMODCACHE GOCACHE \
+            FNM_DIR FNM_MULTISHELL_PATH FNM_VERSION_FILE_STRATEGY FNM_RESOLVE_ENGINES \
+            FNM_COREPACK_ENABLED FNM_ARCH FNM_LOGLEVEL; do   # brew shellenv's prefix; --go caches; --node's fnm dir +
+                                                            # `fnm env` settings (not the dist mirror: a URL can embed a token)
   [ -n "${!name:-}" ] && clean_env+=("$name=${!name}")   # include only vars that are actually set
 done
 

@@ -82,10 +82,12 @@ invocation grants; [DESIGN.md](DESIGN.md) explains why each grant is there.
 
 ## Limitations
 
-- **macOS on Apple Silicon**, default toolchains (Homebrew, `rustup`, `nvm` + stock `npm`,
-  Apple `python3`, Go from go.dev or brew). pyenv, pnpm, yarn, and `~/sdk` Go toolchains
-  aren't auto-detected — grant them with `-r`/`-w` (linters' caches too, e.g.
+- **macOS on Apple Silicon**, default toolchains (Homebrew, `rustup`, `nvm`/`fnm` + stock
+  `npm`, Apple `python3`, Go from go.dev or brew). pyenv, volta, pnpm, yarn, and `~/sdk` Go
+  toolchains aren't auto-detected — grant them with `-r`/`-w` (linters' caches too, e.g.
   `-w ~/Library/Caches/golangci-lint`).
+- `--node`: node versions are read-only, so `npm -g`, `fnm install` and `fnm use` fail inside
+  by design — the node version is the one your launching shell had.
 - `--brew` is read-only wholesale: `brew install`/`upgrade` fail inside by design. Prefer
   `/opt/homebrew/opt/<formula>` over `brew --prefix <formula>` in build scripts.
 - `--go`: `go install` into `~/go/bin` fails by design (`go run pkg@version` instead); your

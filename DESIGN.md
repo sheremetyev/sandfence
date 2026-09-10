@@ -216,6 +216,20 @@ service configs there (`redis.conf`, `mosquitto.conf`, brew git's `gitconfig`) c
 passwords or tokens. The prefix must contain `bin/brew` — a sanity check so a stale
 `HOMEBREW_PREFIX` fails loudly, not a boundary.
 
+`--node` grants node versions read-only and the npm cache read-write. Versions come from
+**nvm** (`~/.nvm`) and **fnm**: `FNM_DIR` from your environment (`fnm env` exports it),
+else the first existing of `~/.local/share/fnm`, `~/.fnm`, `~/Library/Application
+Support/fnm`, pinned in the sandbox's environment so fnm inside uses the granted tree.
+Each version's global `etc/npmrc` is denied (registry token), and the tree is read-only
+because `fnm install` or `npm -g` would plant a binary that a later unsandboxed shell
+execs. fnm's other moving part: `fnm env` puts `$FNM_MULTISHELL_PATH/bin` on PATH, a
+per-shell symlink to one version. PATH passes through, so that link is what `node`
+resolves through inside; it is granted read-only and its directory is write-denied
+(older fnm keeps it under `$TMPDIR`, which is writable wholesale), because re-pointing it
+would switch the *launching* shell's node to whatever the agent planted. So `fnm use`
+fails inside and the version is whatever your shell had. `~/.npmrc` and the `-g` homes stay denied; npm's user config is
+pointed at an empty file so it neither reads the token nor crashes.
+
 `--python` grants only the pip cache; the interpreter is whatever `python3` is on PATH —
 Apple's from the baseline, brew's under `--brew`, pyenv's with `-r ~/.pyenv` — and an
 ungranted one fails to exec rather than being silently swapped for Apple's.
@@ -238,9 +252,9 @@ caches are created at launch, because go aborts when it can't create `GOCACHE` a
 parents aren't writable inside. The toolchain is whatever `go` is on PATH: the go.dev
 installer's `/usr/local/go` is in the baseline, brew's needs `--brew`.
 
-They assume the common layouts — Homebrew, rustup/cargo, nvm, Apple's `python3`, go's
+They assume the common layouts — Homebrew, rustup/cargo, nvm/fnm, Apple's `python3`, go's
 default `GOPATH`. Other
-toolchains (pyenv, fnm, volta, pnpm, yarn) aren't auto-detected on purpose: a preset is a
+toolchains (pyenv, volta, pnpm, yarn) aren't auto-detected on purpose: a preset is a
 real grant, and guessing wrong either over-exposes a tree or silently misses one.
 Instead, grant exactly what they need with `-r`/`-w`. This is also where you'd add a new
 preset — copy the shape of an existing `case` branch: grant the narrowest tree that
