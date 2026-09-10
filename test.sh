@@ -318,6 +318,21 @@ FNM_DIR="$fnmalt" assert_allow_home "node: FNM_DIR from the env is granted read-
 FNM_DIR="$fnmalt" assert_deny_home  "node: with FNM_DIR set, the default fnm dir is NOT granted" --node /bin/cat "$fnminst/marker"
 unset FNM_DIR FNM_MULTISHELL_PATH
 
+# --- node: corepack ---
+# Its home (~/.cache/node/corepack) is read-only: cached package managers run, but a fetched (or
+# planted) one — exec'd by a later UNsandboxed shim — can't land. Pinned in the env; COREPACK_HOME wins.
+unset COREPACK_HOME
+cph="$fakehome/.cache/node/corepack"; mkdir -p "$cph/v1/pnpm/9"; printf 'PM\n' > "$cph/v1/pnpm/9/marker"
+assert_allow_home "node: corepack home (~/.cache/node/corepack) is readable"     --node /bin/cat "$cph/v1/pnpm/9/marker"
+assert_allow_home "node: COREPACK_HOME is pinned to the granted home inside"     --node /bin/sh -c "[ \"\$COREPACK_HOME\" = '$cph' ]"
+sf_home --node /bin/sh -c "echo EVIL > '$cph/v1/pnpm/9/planted'" >/dev/null 2>&1
+if [ -e "$cph/v1/pnpm/9/planted" ]; then bad "node: corepack home is NOT writable (no fetched/planted package manager)"; rm -f "$cph/v1/pnpm/9/planted"
+else ok "node: corepack home is NOT writable (no fetched/planted package manager)"; fi
+cpalt="$fakehome/corepack-alt"; mkdir -p "$cpalt"; printf 'ALT\n' > "$cpalt/marker"
+COREPACK_HOME="$cpalt" assert_allow_home "node: COREPACK_HOME from the env is granted read-only"       --node /bin/cat "$cpalt/marker"
+COREPACK_HOME="$cpalt" assert_deny_home  "node: with COREPACK_HOME set, the default home is NOT granted" --node /bin/cat "$cph/v1/pnpm/9/marker"
+unset COREPACK_HOME
+
 # --- python ---
 mkdir -p "$fakehome/Library/Caches/pip"
 assert_allow_home "python: pip cache (~/Library/Caches/pip) is writable" --python /bin/sh -c "echo x > '$fakehome/Library/Caches/pip/probe'"

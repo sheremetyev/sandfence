@@ -228,7 +228,11 @@ resolves through inside; it is granted read-only and its directory is write-deni
 (older fnm keeps it under `$TMPDIR`, which is writable wholesale), because re-pointing it
 would switch the *launching* shell's node to whatever the agent planted. So `fnm use`
 fails inside and the version is whatever your shell had. `~/.npmrc` and the `-g` homes stay denied; npm's user config is
-pointed at an empty file so it neither reads the token nor crashes.
+pointed at an empty file so it neither reads the token nor crashes. Corepack's home
+(`COREPACK_HOME`, default `~/.cache/node/corepack`, pinned in the environment) is read-only
+for the same reason as the go toolchain cache: a later unsandboxed shim execs whatever sits
+there. Cached package managers run; fetching one fails until you `corepack prepare` it
+outside.
 
 `--python` grants only the pip cache; the interpreter is whatever `python3` is on PATH —
 Apple's from the baseline, brew's under `--brew`, pyenv's with `-r ~/.pyenv` — and an

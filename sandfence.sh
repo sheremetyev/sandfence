@@ -354,7 +354,7 @@ for p in "${presets[@]+"${presets[@]}"}"; do
       dynamic+="(deny file-read* file-write* (literal \"$HOME/.cargo/config\") (literal \"$HOME/.cargo/config.toml\") (literal \"$HOME/.cargo/credentials.toml\") (literal \"$HOME/.cargo/credentials\"))"$'\n'
       ;;
     node)
-      sect "preset: node/npm (nvm + fnm ro; npm cache rw; config + registry token denied)"
+      sect "preset: node/npm (nvm + fnm + corepack ro; npm cache rw; config + registry token denied)"
       grant_ro "$HOME/.nvm"                   # nvm: node versions + nvm itself
       grant_rw "$HOME/.npm"                   # npm cache
       dynamic+="(deny file-read* (subpath \"$HOME/.npm/_logs\"))"$'\n'   # logs can hold old tokens; writes still allowed
@@ -384,6 +384,12 @@ for p in "${presets[@]+"${presets[@]}"}"; do
           dynamic+="(deny file-write* (subpath \"${ms%/*}\") (literal \"${ms%/*}\"))"$'\n'
         fi
       fi
+      # corepack (node's pnpm/yarn shims): its home read-only, pinned in the env. Cached package managers
+      # run; fetching one fails (a planted one would be exec'd by a later UNsandboxed shim) — run
+      # `corepack prepare <pm>@<ver> --activate` (or a first `pnpm --version`) outside once.
+      corepack_home="$(canon_dir "${COREPACK_HOME:-$HOME/.cache/node/corepack}")"
+      export COREPACK_HOME="$corepack_home"
+      grant_ro "$corepack_home"
       # NOT granted (default-deny): ~/.npmrc + the global config/bin homes — they hold the
       # registry token and -g install bins. Point npm's USER config at an empty file so it
       # neither reads your token nor EPERM-crashes. Stock npm only; for pnpm/yarn grant their
@@ -513,8 +519,9 @@ for name in PATH HOME USER LOGNAME SHELL TERM TMPDIR PWD \
             XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL NPM_CONFIG_USERCONFIG \
             HOMEBREW_PREFIX GOPATH GOMODCACHE GOCACHE \
             FNM_DIR FNM_MULTISHELL_PATH FNM_VERSION_FILE_STRATEGY FNM_RESOLVE_ENGINES \
-            FNM_COREPACK_ENABLED FNM_ARCH FNM_LOGLEVEL; do   # brew shellenv's prefix; --go caches; --node's fnm dir +
-                                                            # `fnm env` settings (not the dist mirror: a URL can embed a token)
+            FNM_COREPACK_ENABLED FNM_ARCH FNM_LOGLEVEL COREPACK_HOME; do   # brew shellenv's prefix; --go caches; --node's
+                                                            # fnm dir + `fnm env` settings (not the dist mirror: a URL can
+                                                            # embed a token) + corepack home
   [ -n "${!name:-}" ] && clean_env+=("$name=${!name}")   # include only vars that are actually set
 done
 
