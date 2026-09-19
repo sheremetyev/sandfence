@@ -136,6 +136,11 @@ Xcode license plist as a license check — deny it and *every* git operation fai
 "license not agreed." Both are granted read-only in the baseline, which is also why
 Apple's `python3` works with no preset at all.
 
+**Blocked file watching looks like fd exhaustion.** Directory watchers (`fs.watch`,
+dev servers) need `fseventsd`; without it node fails with `EMFILE: too many open
+files, watch`. The baseline allows it — `fseventsd` filters events by the client's
+sandbox, so a watcher on `/` sees the working copy, not the rest of `$HOME`.
+
 ## The working copy and history
 
 The current directory is granted read-write — it's the unit of work. Its own top-level

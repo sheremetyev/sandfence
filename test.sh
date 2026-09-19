@@ -108,6 +108,38 @@ p = m.Pool(2)
 assert p.map(abs, [-1, -2]) == [1, 2]
 p.close(); p.join()'
 
+# FSEvents: a sandboxed watcher on / sees a change in the working copy, but not one in $HOME.
+fswd="$root/fsevents"; rm -rf "$fswd"; mkdir -p "$fswd"
+cat > "$fswd/fsw.c" <<'EOF'
+#include <CoreServices/CoreServices.h>
+static void cb(ConstFSEventStreamRef s, void *i, size_t n, void *p,
+               const FSEventStreamEventFlags f[], const FSEventStreamEventId id[]) {
+  for (size_t k = 0; k < n; k++) printf("%s\n", ((char **)p)[k]);
+  fflush(stdout);
+}
+int main(void) {
+  CFArrayRef root = CFArrayCreate(NULL, (const void *[]){CFSTR("/")}, 1, NULL);
+  FSEventStreamRef s = FSEventStreamCreate(NULL, cb, NULL, root, kFSEventStreamEventIdSinceNow, 0.1,
+      kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer);
+  FSEventStreamSetDispatchQueue(s, dispatch_get_main_queue());
+  FSEventStreamStart(s);
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ exit(0); });
+  dispatch_main();
+}
+EOF
+if /usr/bin/clang -framework CoreServices -o "$fswd/fsw" "$fswd/fsw.c" >/dev/null 2>&1; then
+  inside="$fswd/changed"; outside="$HOME/.sandfence-fsevents-probe.$$"
+  ( cd "$fswd" && "$SF" ./fsw > out 2>/dev/null ) & sleep 1
+  : > "$inside"; : > "$outside"; wait "$!"; rm -f "$inside" "$outside"
+  if grep -qxF "$inside"  "$fswd/out"; then ok "FSEvents: watching sees working-copy changes"
+  else bad "FSEvents: watching sees working-copy changes"; fi
+  # match the unique name, not the full path — events may spell $HOME differently (symlink, firmlink)
+  if grep -qF "${outside##*/}" "$fswd/out"; then bad "FSEvents: changes in \$HOME are NOT reported"
+  else ok "FSEvents: changes in \$HOME are NOT reported"; fi
+else
+  skip "FSEvents probe (clang unavailable)"
+fi
+
 echo
 echo "[launch guard]"
 # Launching with the working copy = $HOME (or /) is refused outright — it would

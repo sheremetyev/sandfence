@@ -213,6 +213,9 @@ IFS= read -r -d '' static_body <<'SBPL' || true
     (ipc-posix-name "apple.shm.notification_center")
     (ipc-posix-name-prefix "apple.cfprefs."))
 
+;; --- FSEvents: directory watchers (fs.watch, dev servers); filtered to our sandbox
+(allow mach-lookup (global-name "com.apple.FSEvents"))
+
 ;; --- POSIX semaphores ------------------------------------------------------
 ;; Python multiprocessing locks a Pool with one, and each child re-opens it by name —
 ;; create and open are separate ops, hence the whole family.
