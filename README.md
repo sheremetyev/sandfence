@@ -1,6 +1,6 @@
 # Sandfence
 
-Run a coding agent — **Claude Code** or **Codex** — on a repo in its own
+Run a coding agent — **Claude Code**, **Codex** or **Grok** — on a repo in its own
 "skip-permissions" mode, while the **macOS sandbox**, not the agent, enforces what it
 can touch. A wrong `rm -rf`, a stray `git reset --hard`, a `pip install` into your
 system: the sandbox turns these from incidents into errors.
@@ -64,6 +64,9 @@ login Keychain, never your shell environment.
   refreshes it from then on.
 - **Codex** — run `codex login` once (anywhere); its token lives in `~/.codex/auth.json`,
   which the sandbox reads.
+- **Grok** — run `grok login` once, outside the sandbox (it opens a browser); its token
+  lives in `~/.grok/auth.json`. Update grok outside too: it installs itself under `~/.grok`,
+  which the sandbox keeps read-only.
 
 ## What the agent can touch
 

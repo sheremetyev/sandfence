@@ -195,20 +195,64 @@ exactly where expected — so a symlinked or forged `.git` can't redirect the gr
 
 ## Agent bundles
 
-`claude`/`codex` as the tool (or `--claude`/`--codex` as a flag) adds a bundle for that
-agent: read+exec of its own binary, and read-write to its own state directory. Two
-deliberate choices:
+`claude`/`codex`/`grok` as the tool (or `--claude`/`--codex`/`--grok` as a flag) adds a
+bundle for that agent: read+exec of its own binary, and read-write to its own state
+directory. Deliberate choices:
 
 - **Auth is a file, never the Keychain.** Each agent authenticates from a credential
   file in its own granted state dir (`~/.claude/.credentials.json`,
-  `~/.codex/auth.json`) and refreshes it in place. The login Keychain is never granted,
-  and the token never sits in the environment. The only credential the agent can reach
-  is its own — which is what makes leaving the network open acceptable.
+  `~/.codex/auth.json`, `~/.grok/auth.json`) and refreshes it in place. The login
+  Keychain is never granted, and the token never sits in the environment. The only
+  credential the agent can reach is its own — which is what makes leaving the network
+  open acceptable.
 - **Persistence files are write-denied.** `~/.claude/settings.json` and
   `~/.codex/config.toml` carry hooks, MCP servers, and notify commands that would run on
   a *later, unsandboxed* invocation. They're readable but not writable (same
   last-match-wins trick as `.git`), so a sandboxed run can't plant something that fires
   outside the box later.
+- **grok's state dir is read-only, with its runtime state allowlisted.** `~/.grok`
+  mixes state with things a later unsandboxed grok, or your shell, executes: the grok
+  binary itself (`bin/`, `downloads/`), an extracted ripgrep (`vendor/`),
+  plugins/skills/workflows, hook sources (`config.toml`, `requirements.toml`,
+  `hooks-paths`, `disabled-hooks`), `lsp.json` server commands, folder trust, and shell
+  completions — and each release adds more. So the deny list is inverted: the whole
+  directory is read-only, and only the state grok writes as it runs is opened, by name
+  (`auth.json`, `sessions/`, `logs/`, memory, locks, `.tmp*` atomic-write files). A
+  rename onto an unlisted name is still a denied write. When a new grok version needs a
+  new state file it fails loudly, and the fix is one name in the list. Self-update and
+  plugin installs fail inside the sandbox; do those outside.
+- **Some of what grok rewrites at launch is really config, so it stays read-only.**
+  `settings_cache.json` carries the remote switches for hooks, folder trust, and
+  permission mode; its signature uses an HMAC key shipped inside the binary, so a
+  sandboxed run could re-sign a rewritten one. `models_cache.json` is unsigned and
+  names the model endpoint (`base_url`, headers). `version.json` is the update check,
+  which decides what grok offers to download. Denied, grok simply refetches all three
+  at each launch, and `docs/` is re-extracted from the binary. In `sessions/`,
+  `permission*.toml` — a project's remembered "always allow" grants — is denied at any
+  depth, so it can't be written directly or built deeper and renamed up. A directory
+  prepared outside `sessions/` and renamed in still lands, since a rename checks only
+  its two endpoints; like the case gap above, that is a deliberate bypass, outside the
+  threat model. The rest of `sessions/`, and memory, stay
+  writable: they feed a later session's *prompt*, not its config, and that instruction
+  channel is out of scope (see the threat model).
+- **grok's leader socket is private to the run.** grok routes work through a "leader"
+  process on a Unix socket, `~/.grok/leader.sock` by default. The network is open, and
+  that includes Unix sockets. A sandboxed grok that joined a leader started by an
+  unsandboxed grok would run work outside the box. So `grok` as the tool gets
+  `--leader-socket $TMPDIR/sandfence-grok-<pid>.sock`, and connecting to or binding any
+  socket under `~/.grok` is denied. The deny is what makes it safe; the flag just keeps
+  the leader out of grok's default path. A grok that another agent starts inside the box
+  (say, as a reviewer) gets no flag and still runs, verified with a headless prompt: the
+  bind on the denied default path fails and grok carries on without it.
+- **grok can reach the WindowServer.** When you press Backspace or Esc, grok's TUI asks
+  the WindowServer which modifier keys are held (`CGEventSourceFlagsState`). If the
+  service is unreachable, macOS's SkyLight library deadlocks and the TUI freezes. So
+  the grok bundle, and only that bundle, may look up `com.apple.windowserver.active`.
+  The cost is what that connection allows. Posting synthetic keystrokes, capturing the
+  screen, and tapping input are each gated by TCC and attributed to your *terminal app*.
+  So if your terminal has Accessibility, Screen Recording, or Input Monitoring
+  permission, a sandboxed grok session effectively inherits it. Keep those off for the
+  terminal you run `s grok` in.
 
 Note that Seatbelt grants are **per-process-tree, not per-executable**. So
 `--codex claude` (run codex from inside a claude session) grants `~/.codex` to the whole

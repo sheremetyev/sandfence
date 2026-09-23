@@ -10,7 +10,7 @@ set -euo pipefail
 # ~/.gitconfig credentials. See DESIGN.md for how it works and why each grant exists.
 #
 # Usage:  sandfence.sh [-r PATH]... [-w PATH]... [--brew|--rust|--node|--python|--go]
-#                      [--claude|--codex] [--print] <tool> [args...]
+#                      [--claude|--codex|--grok] [--print] <tool> [args...]
 # ============================================================================
 
 usage() {
@@ -20,6 +20,7 @@ usage() {
     '  -w PATH    read-write access to a dir or file  (repeatable; a dir keeps its .git/.jj + agent config read-only)' \
     '  --claude   also grant the claude agent bundle (binary + ~/.claude state; auth via file, not Keychain)' \
     '  --codex    also grant the codex agent bundle  (binary + node runtime + ~/.codex state)' \
+    '  --grok     also grant the grok agent bundle   (binary + ~/.grok read-only; only its runtime state writable)' \
     '  --rust/--node/--python/--go  toolchain preset: caches writable, registry tokens + PATH-plant denied' \
     '  --brew     Homebrew prefix read-only ($HOMEBREW_PREFIX, default /opt/homebrew); var/ + brew/npm config denied' \
     '  --print    print the composed SBPL profile and exit (also -p)' \
@@ -92,7 +93,7 @@ while [[ $# -gt 0 ]]; do
     -r*) reads+=("${1#-r}"); shift ;;
     -w)  [[ $# -ge 2 ]] || { echo "sandfence.sh: -w needs a path" >&2; exit 1; }; writes+=("$2"); shift 2 ;;
     -w*) writes+=("${1#-w}"); shift ;;
-    --claude|--codex) agents+=("${1#--}"); shift ;;
+    --claude|--codex|--grok) agents+=("${1#--}"); shift ;;
     --brew|--rust|--node|--python|--go) presets+=("${1#--}"); shift ;;
     -p|--print) print_only=1; shift ;;
     -h|--help)  usage 0 ;;
@@ -106,6 +107,9 @@ if [[ $# -ge 1 ]]; then
   case "$tool" in
     claude) cmd=("$(command -v claude || true)" --dangerously-skip-permissions) ;;
     codex)  cmd=("$(command -v codex || true)" --dangerously-bypass-approvals-and-sandbox) ;;
+    # A private leader socket: grok spawns its leader INSIDE the box instead of joining an unsandboxed one.
+    grok)   cmd=("$(command -v grok || true)" --always-approve \
+                 --leader-socket "${TMPDIR:-/tmp}/sandfence-grok-$$.sock") ;;
     *)      cmd=("$tool") ;;
   esac
 elif [[ -n "$print_only" ]]; then
@@ -113,9 +117,9 @@ elif [[ -n "$print_only" ]]; then
 else
   usage 1
 fi
-# The tool's own bundle auto-applies; --claude/--codex add the OTHER agent's bundle too
+# The tool's own bundle auto-applies; --claude/--codex/--grok add the OTHER agent's bundle too
 # (e.g. `--codex claude` lets a claude session also read/run codex). See DESIGN.md ("Agent bundles").
-case "$tool" in claude|codex) agents+=("$tool") ;; esac
+case "$tool" in claude|codex|grok) agents+=("$tool") ;; esac
 
 # ---------------------------------------------------------------------------
 # Static baseline: read-only, secret-free. NOTE: never grant (subpath "/System")
@@ -286,9 +290,9 @@ if [ -f "$workdir/.jj/repo" ]; then                                  # secondary
 fi
 
 # ---------------------------------------------------------------------------
-# Agent bundles (--claude/--codex, or claude/codex as the tool): grant each
+# Agent bundles (--claude/--codex/--grok, or the agent as the tool): grant each
 # agent's own binary + state dir. Auth is a file there (~/.claude/.credentials.json,
-# ~/.codex/auth.json), never the Keychain. settings.json / config.toml are
+# ~/.codex/auth.json, ~/.grok/auth.json), never the Keychain. settings.json / config.toml are
 # write-denied — they carry hooks / MCP / notify commands that would fire on a
 # later UNsandboxed run (the deny follows the rw grant, so last-match-wins blocks
 # the write while reads still work). See DESIGN.md ("Agent bundles").
@@ -325,6 +329,27 @@ for a in "${agents[@]+"${agents[@]}"}"; do
             dynamic+="(deny file-read* (literal \"$noderoot/etc/npmrc\"))"$'\n' ;;   # …minus its global npmrc (may hold a registry token)
         esac
       fi
+      ;;
+    grok)
+      sect "grok: ~/.grok read-only, its runtime state (rw) allowlisted; leader sockets denied"
+      grok_bin="$(command -v grok || true)"
+      case "$grok_bin" in /*) grant_file "$grok_bin" ;; esac   # absolute only (~/.local/bin/grok → a symlink into ~/.grok)
+      # ~/.grok mixes state with code a later UNsandboxed grok runs (its binary, a ripgrep, hooks,
+      # lsp.json, folder trust). So: read-only, then its runtime state opened by name; new names stay denied.
+      grant_ro "$HOME/.grok"
+      # A (prefix) also covers .lock/-wal/.tmp siblings and a dir's contents. Deliberately absent though
+      # rewritten at launch (grok refetches them): settings_cache.json, models_cache.json, version.json, docs/.
+      for f in auth.json active_sessions agent_id mcp_credentials.json tip_cursor.json slash-mru.json \
+               last-copy.txt worktrees.db CHANGELOG managed_config.lock trusted_folders.toml.lock \
+               .config-init.lock .metadata_version .tmp sessions logs memory memtrace grove; do
+        dynamic+="(allow file-write* (prefix \"$HOME/.grok/$f\"))"$'\n'
+      done
+      # …except a project's remembered grants (sessions/<project>/permission*.toml), at any depth.
+      dynamic+="(deny file-write* (require-all (subpath \"$HOME/.grok/sessions\") (regex #\"/permission[^/]*\\.toml\$\")))"$'\n'
+      # No unix sockets under ~/.grok: never join (or squat on) an UNsandboxed grok's leader.
+      dynamic+="(deny network-outbound network-bind (subpath \"$HOME/.grok\"))"$'\n'
+      # Without the WindowServer, grok's TUI deadlocks on Backspace/Esc. See DESIGN.md for the cost.
+      dynamic+="(allow mach-lookup (global-name \"com.apple.windowserver.active\"))"$'\n'
       ;;
   esac
 done
@@ -529,6 +554,7 @@ for a in "${agents[@]+"${agents[@]}"}"; do
   case "$a" in
     claude) mkdir -p "$HOME/.claude" 2>/dev/null || true ;;
     codex)  mkdir -p "$HOME/.codex"  2>/dev/null || true ;;
+    grok)   mkdir -p "$HOME/.grok"   2>/dev/null || true ;;
   esac
 done
 # --go caches: go aborts if it can't create them, and their parents aren't writable inside.

@@ -288,6 +288,48 @@ if ( cd "$wc" && HOME="$fakehome" PATH="$fakehome/.local/bin:$PATH" "$SF" --code
   bad "codex: a non-nvm prefix (~/.local/bin) does NOT grant ~/.local"
 else ok "codex: a non-nvm prefix (~/.local/bin) does NOT grant ~/.local"; fi
 
+# ~/.grok is read-only (it holds code a later UNsandboxed grok runs), with runtime state opened by
+# name: listed state is writable, everything else — new files included — is not.
+mkdir -p "$fakehome/.grok/bin" "$fakehome/.grok/vendor" "$fakehome/.grok/sessions/proj"
+printf '#!/bin/sh\necho ORIG\n' > "$fakehome/.grok/bin/grok"; chmod +x "$fakehome/.grok/bin/grok"
+printf '#!/bin/sh\necho ORIG\n' > "$fakehome/.grok/vendor/rg-15.0.0-override"
+for f in auth.json config.toml trusted_folders.toml hooks-paths requirements.toml lsp.json \
+         disabled-hooks settings_cache.json models_cache.json sessions/proj/permission.toml; do
+  printf 'ORIG\n' > "$fakehome/.grok/$f"
+done
+assert_allow_home "grok: own ~/.grok/auth.json is writable"              --grok /bin/sh -c "echo x >> '$fakehome/.grok/auth.json'"
+assert_allow_home "grok: its sessions/ dir is writable"                  --grok /bin/sh -c "echo x > '$fakehome/.grok/sessions/proj/resources_state.json'"
+assert_allow_home "grok: an atomic-write temp file is writable"          --grok /bin/sh -c "echo x > '$fakehome/.grok/.tmpAbC123'"
+assert_deny_home  "grok: an unlisted NEW file under ~/.grok is denied"   --grok /bin/sh -c "echo x > '$fakehome/.grok/future-hooks.json'"
+assert_deny_home  "grok: a permission.toml built deeper can't be staged" --grok /bin/sh -c "mkdir -p '$fakehome/.grok/sessions/stage/p2' && echo x > '$fakehome/.grok/sessions/stage/p2/permission.toml'"
+assert_deny_home  "grok: its bin/ can't be swapped out by rename"        --grok /bin/mv "$fakehome/.grok/bin" "$fakehome/.grok/bin.old"
+# Each of these is code or config a later grok loads; check the CONTENT, not just the exit code.
+for f in config.toml trusted_folders.toml bin/grok vendor/rg-15.0.0-override hooks-paths requirements.toml \
+         lsp.json disabled-hooks settings_cache.json models_cache.json sessions/proj/permission.toml; do
+  sf_home --grok /bin/sh -c "echo CLOBBER > '$fakehome/.grok/$f'" >/dev/null 2>&1
+  if grep -q CLOBBER "$fakehome/.grok/$f" 2>/dev/null; then
+    bad "grok: ~/.grok/$f write is denied (persistence guard)"
+  else ok "grok: ~/.grok/$f write is denied (persistence guard)"; fi
+done
+# No unix sockets under ~/.grok: never join an UNsandboxed grok's leader, nor bind one it would join.
+# The bind probe uses a writable path (sessions/), so only the network rule can be what denies it.
+sock="$fakehome/.grok/leader.sock"; bsock="$fakehome/.grok/sessions/leader.sock"
+if [ "${#bsock}" -lt 100 ]; then
+  sockpy='import socket,sys; s=socket.socket(socket.AF_UNIX); getattr(s,sys.argv[1])(sys.argv[2])'
+  assert_deny_home "grok: can't bind a unix socket under ~/.grok, even where files are writable" \
+    --grok /usr/bin/python3 -c "$sockpy" bind "$bsock"
+  rm -f "$bsock" "$sock"
+  /usr/bin/python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(10)' "$sock" &
+  lpid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$sock" ] && break; /bin/sleep 0.2; done
+  if [ -S "$sock" ]; then   # the listener must exist, else "connect" fails for the wrong reason
+    assert_deny_home "grok: can't connect to an unsandboxed leader socket"  --grok /usr/bin/python3 -c "$sockpy" connect "$sock"
+  else bad "setup: unsandboxed leader socket never appeared (connect probe skipped)"; fi
+  kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null; rm -f "$sock"
+else
+  skip "grok: socket probes (test root path too long for a unix socket)"
+fi
+
 echo
 echo "[toolchains]"
 # Presets are named -r/-w bundles: toolchain caches writable, but registry TOKENS and PATH-plant
