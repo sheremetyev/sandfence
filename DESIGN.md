@@ -195,9 +195,9 @@ exactly where expected — so a symlinked or forged `.git` can't redirect the gr
 
 ## Agent bundles
 
-`claude`/`codex`/`grok` as the tool (or `--claude`/`--codex`/`--grok` as a flag) adds a
-bundle for that agent: read+exec of its own binary, and read-write to its own state
-directory. Deliberate choices:
+`claude`/`codex`/`grok`/`cursor-agent` as the tool (or `--claude`/`--codex`/`--grok`/`--cursor`
+as a flag) adds a bundle for that agent: read+exec of its own binary, and read-write to its own
+state directory. Deliberate choices:
 
 - **Auth is a file, never the Keychain.** Each agent authenticates from a credential
   file in its own granted state dir (`~/.claude/.credentials.json`,
@@ -253,6 +253,48 @@ directory. Deliberate choices:
   So if your terminal has Accessibility, Screen Recording, or Input Monitoring
   permission, a sandboxed grok session effectively inherits it. Keep those off for the
   terminal you run `s grok` in.
+- **cursor-agent's state dir is the editor's too, so it gets the same inversion.**
+  `~/.cursor` is shared with Cursor.app, and most of it is code one of the two runs:
+  `extensions/`, `plugins/`, `skills-cursor/`, `agents/`, and an `agent-helper/` the CLI
+  downloads. `mcp.json` names MCP servers for both. `cli-config.json` holds
+  `permissions.allow`, which auto-approves tools in a later unsandboxed run, alongside
+  the backend URLs; `statsig-cache.json` is remote feature flags; the CLI also syncs
+  `skills-cursor/` at launch. So the whole directory is read-only and the runtime state
+  is opened by name — `auth.json`, `mcp-auth.json`, `chats/`, `projects/`, `plans/`,
+  `snapshots/`, `worktrees/`, `debug-*.log`, `ai-tracking/`. Inside `projects/`, two
+  names are config rather than state and stay denied at any depth, like grok's
+  `permission*.toml`: `.workspace-trusted`, a project's trust marker (with one exception,
+  below), and `mcp-approvals.json`, its remembered MCP-server approvals. The stakes are higher than
+  grok's: a planted `~/.grok` file waits for your next `grok` run, but a planted
+  `~/.cursor` one is picked up by an editor you have open all day. The cost is that model
+  choice and UI prefs don't persist out of a sandboxed session, since both live in the
+  same read-only `cli-config.json`, and the skills sync is skipped.
+- **cursor-agent gets three environment decisions.** Its credentials go to a file rather
+  than the Keychain, which it only does when `AGENT_CLI_CREDENTIAL_STORE=file` is set, so
+  sandfence sets it (and you log in once outside with the same var). Its Node compile
+  cache is redirected to `$TMPDIR/sandfence-cursor-cache`, because the default
+  `~/Library/Caches/cursor-compile-cache` is loaded by unsandboxed runs too. And its own
+  sandbox mode is pinned off with `--sandbox disabled`: it shells out to `sandbox-exec`,
+  which cannot nest inside ours, and whether it defaults on is a server-side switch.
+  `--trust` is passed per run, and the one marker it writes, the working copy's own
+  `projects/<path>/.workspace-trusted`, is allowed: cursor-agent exits if that write
+  fails, and trusting the directory you launched in is what running sandfence there
+  means. For that allow to stay narrow, the names directly under `projects/` are
+  frozen inside (no create, rename or delete), because a renamed directory or a symlink
+  named for another project would carry a trust marker onto it. The launcher creates
+  the working copy's directory before the box starts. Cursor's naming maps some
+  distinct paths to one directory (`a-b` and `a_b`); that conflation is Cursor's own.
+- **`agent` names two different agents, so the bundle follows the binary.** Grok and
+  Cursor both install a command called `agent`; PATH order decides which one you get.
+  Picking the bundle by name would hand one agent the other's state dir and the wrong
+  auto-approve flag — a confinement bug that only shows up on machines with both. So for
+  that one name the tool is resolved (`readlink -f` of the `command -v` hit) and the
+  bundle chosen by where it lands: under `~/.grok` or under
+  `~/.local/share/cursor-agent`. The `agent` symlink itself is granted too: it sits
+  beside the bundle's own binary rather than being it, and `~/.local/bin` is never
+  readable as a directory, so without its own grant a shell inside a `--cursor` session
+  would skip it and fall through to grok's `agent`. Every other name maps exactly, so
+  bare `cursor` (the editor's launcher) gets no bundle.
 
 Note that Seatbelt grants are **per-process-tree, not per-executable**. So
 `--codex claude` (run codex from inside a claude session) grants `~/.codex` to the whole

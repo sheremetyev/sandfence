@@ -330,6 +330,77 @@ else
   skip "grok: socket probes (test root path too long for a unix socket)"
 fi
 
+# ~/.cursor is Cursor.app's directory as well as the CLI's, and most of it is code one of the two
+# runs. Same shape as grok: read-only, with the runtime state opened by name.
+mkdir -p "$fakehome/.cursor/extensions" "$fakehome/.cursor/plugins/local" "$fakehome/.cursor/skills-cursor/s" \
+         "$fakehome/.cursor/agents" "$fakehome/.cursor/agent-helper/bin" "$fakehome/.cursor/chats" \
+         "$fakehome/.cursor/projects/p" "$fakehome/.cursor/projects/stage" "$fakehome/.cursor/projects/Users-someone-else"
+printf '#!/bin/sh\necho ORIG\n' > "$fakehome/.cursor/agent-helper/bin/helper"; chmod +x "$fakehome/.cursor/agent-helper/bin/helper"
+for f in auth.json cli-config.json statsig-cache.json mcp.json argv.json ide_state.json \
+         extensions/ext.js plugins/local/p.js skills-cursor/s/SKILL.md agents/a.md \
+         projects/p/.workspace-trusted projects/p/mcp-approvals.json; do
+  printf 'ORIG\n' > "$fakehome/.cursor/$f"
+done
+assert_allow_home "cursor: own ~/.cursor/auth.json is writable"            --cursor /bin/sh -c "echo x >> '$fakehome/.cursor/auth.json'"
+assert_allow_home "cursor: its chats/ + projects/ dirs are writable"       --cursor /bin/sh -c "echo x > '$fakehome/.cursor/chats/c1' && echo x > '$fakehome/.cursor/projects/p/terminals'"
+assert_allow_home "cursor: a debug-<id>.log is writable"                   --cursor /bin/sh -c "echo x > '$fakehome/.cursor/debug-abc.log'"
+assert_deny_home  "cursor: an unlisted NEW file under ~/.cursor is denied" --cursor /bin/sh -c "echo x > '$fakehome/.cursor/future-hooks.json'"
+# The trust marker is denied for every project but the working copy's own, which `--trust` writes (cursor's name
+# for it: the path, non-alphanumerics → one dash); the launcher pre-creates that dir, and the names directly under
+# projects/ are then frozen so the marker can't be carried onto another project's name by renaming the dir or
+# symlinking a new name to it.
+wcproj="$(printf '%s' "$wc" | LC_ALL=C sed 's/[^a-zA-Z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+assert_allow_home "cursor: the working copy's own trust marker is writable" --cursor /bin/sh -c "[ -d '$fakehome/.cursor/projects/$wcproj' ] && echo x > '$fakehome/.cursor/projects/$wcproj/.workspace-trusted'"
+assert_allow_home "cursor: state inside the working copy's project dir is writable" --cursor /bin/sh -c "mkdir -p '$fakehome/.cursor/projects/$wcproj/agent-transcripts' && echo x > '$fakehome/.cursor/projects/$wcproj/agent-transcripts/t.jsonl'"
+assert_deny_home  "cursor: the working copy's project dir can't be renamed"  --cursor /bin/mv "$fakehome/.cursor/projects/$wcproj" "$fakehome/.cursor/projects/Users-victim"
+assert_deny_home  "cursor: another project's dir can't be renamed either"   --cursor /bin/mv "$fakehome/.cursor/projects/Users-someone-else" "$fakehome/.cursor/projects/Users-victim"
+assert_deny_home  "cursor: a project name can't be symlinked to ours"        --cursor /bin/ln -s "$wcproj" "$fakehome/.cursor/projects/Users-victim"
+assert_deny_home  "cursor: projects/ itself can't be renamed"                --cursor /bin/mv "$fakehome/.cursor/projects" "$fakehome/.cursor/projects2"
+assert_deny_home  "cursor: another project's trust marker is denied"       --cursor /bin/sh -c "echo x > '$fakehome/.cursor/projects/Users-someone-else/.workspace-trusted'"
+# projects/ is writable state, except the per-project trust marker and MCP approvals, at any depth.
+assert_deny_home  "cursor: a .workspace-trusted built deeper can't be staged" --cursor /bin/sh -c "mkdir -p '$fakehome/.cursor/projects/stage/p2' && echo x > '$fakehome/.cursor/projects/stage/p2/.workspace-trusted'"
+assert_deny_home  "cursor: extensions/ can't be swapped out by rename"     --cursor /bin/mv "$fakehome/.cursor/extensions" "$fakehome/.cursor/extensions.old"
+# Each of these is code or config a later cursor-agent — or Cursor.app — loads; check the CONTENT.
+for f in cli-config.json statsig-cache.json mcp.json argv.json ide_state.json extensions/ext.js \
+         plugins/local/p.js skills-cursor/s/SKILL.md agents/a.md agent-helper/bin/helper \
+         projects/p/.workspace-trusted projects/p/mcp-approvals.json; do
+  sf_home --cursor /bin/sh -c "echo CLOBBER > '$fakehome/.cursor/$f'" >/dev/null 2>&1
+  if grep -q CLOBBER "$fakehome/.cursor/$f" 2>/dev/null; then
+    bad "cursor: ~/.cursor/$f write is denied (persistence guard)"
+  else ok "cursor: ~/.cursor/$f write is denied (persistence guard)"; fi
+done
+# `agent` is installed by BOTH grok and cursor-agent, so the bundle follows the resolved binary.
+mkdir -p "$fakehome/.local/share/cursor-agent/versions/v1" "$fakehome/.grok/bin"
+: > "$fakehome/.local/share/cursor-agent/versions/v1/cursor-agent"
+chmod +x "$fakehome/.local/share/cursor-agent/versions/v1/cursor-agent"
+ln -sf "$fakehome/.local/share/cursor-agent/versions/v1/cursor-agent" "$fakehome/.local/bin/agent"
+for want in cursor grok; do
+  case "$want" in
+    cursor) probe_path="$fakehome/.local/bin:$PATH" ;;
+    grok)   ln -sf "$fakehome/.grok/bin/grok" "$fakehome/.local/bin/agent"; probe_path="$fakehome/.local/bin:/usr/bin:/bin" ;;  # no `grok` on PATH at all
+  esac
+  prof=$( cd "$wc" && HOME="$fakehome" PATH="$probe_path" "$SF" --print agent 2>/dev/null )
+  if printf '%s' "$prof" | grep -q "^;; --- $want"; then
+    ok "agent: resolves to the $want bundle when it is $want's binary"
+  else bad "agent: resolves to the $want bundle when it is $want's binary"; fi
+  # …and the `agent` symlink actually run is granted, not just the bundle's own name beside it.
+  if printf '%s' "$prof" | grep -qF "(literal \"$fakehome/.local/bin/agent\")"; then
+    ok "agent: the $want bundle grants the agent symlink itself"
+  else bad "agent: the $want bundle grants the agent symlink itself"; fi
+done
+# With the bundle picked by flag and some other command run, `agent` must still resolve inside
+# (~/.local/bin is never readable as a directory, so the symlink needs its own grant).
+ln -sf "$fakehome/.local/share/cursor-agent/versions/v1/cursor-agent" "$fakehome/.local/bin/agent"
+prof=$( cd "$wc" && HOME="$fakehome" PATH="$fakehome/.local/bin:$PATH" "$SF" --print --cursor /bin/sh 2>/dev/null )
+if printf '%s' "$prof" | grep -qF "(literal \"$fakehome/.local/bin/agent\")"; then
+  ok "cursor: --cursor with another command still grants the agent symlink"
+else bad "cursor: --cursor with another command still grants the agent symlink"; fi
+# Bare `cursor` is the editor's launcher, not the agent: no bundle, no agent flags.
+prof=$( cd "$wc" && HOME="$fakehome" "$SF" --print cursor 2>/dev/null )
+if printf '%s' "$prof" | grep -q '^;; --- cursor'; then
+  bad "cursor (the editor launcher) does NOT get the cursor-agent bundle"
+else ok "cursor (the editor launcher) does NOT get the cursor-agent bundle"; fi
+
 echo
 echo "[toolchains]"
 # Presets are named -r/-w bundles: toolchain caches writable, but registry TOKENS and PATH-plant

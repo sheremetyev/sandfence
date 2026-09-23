@@ -10,7 +10,7 @@ set -euo pipefail
 # ~/.gitconfig credentials. See DESIGN.md for how it works and why each grant exists.
 #
 # Usage:  sandfence.sh [-r PATH]... [-w PATH]... [--brew|--rust|--node|--python|--go]
-#                      [--claude|--codex|--grok] [--print] <tool> [args...]
+#                      [--claude|--codex|--grok|--cursor] [--print] <tool> [args...]
 # ============================================================================
 
 usage() {
@@ -21,6 +21,7 @@ usage() {
     '  --claude   also grant the claude agent bundle (binary + ~/.claude state; auth via file, not Keychain)' \
     '  --codex    also grant the codex agent bundle  (binary + node runtime + ~/.codex state)' \
     '  --grok     also grant the grok agent bundle   (binary + ~/.grok read-only; only its runtime state writable)' \
+    '  --cursor   also grant the cursor-agent bundle (binary + ~/.cursor read-only; only its runtime state writable)' \
     '  --rust/--node/--python/--go  toolchain preset: caches writable, registry tokens + PATH-plant denied' \
     '  --brew     Homebrew prefix read-only ($HOMEBREW_PREFIX, default /opt/homebrew); var/ + brew/npm config denied' \
     '  --print    print the composed SBPL profile and exit (also -p)' \
@@ -93,7 +94,7 @@ while [[ $# -gt 0 ]]; do
     -r*) reads+=("${1#-r}"); shift ;;
     -w)  [[ $# -ge 2 ]] || { echo "sandfence.sh: -w needs a path" >&2; exit 1; }; writes+=("$2"); shift 2 ;;
     -w*) writes+=("${1#-w}"); shift ;;
-    --claude|--codex|--grok) agents+=("${1#--}"); shift ;;
+    --claude|--codex|--grok|--cursor) agents+=("${1#--}"); shift ;;
     --brew|--rust|--node|--python|--go) presets+=("${1#--}"); shift ;;
     -p|--print) print_only=1; shift ;;
     -h|--help)  usage 0 ;;
@@ -104,22 +105,35 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ $# -ge 1 ]]; then
   tool="$1"; shift
+  # Which agent, by exact name (bare `cursor` is the editor). Both grok and cursor-agent install an
+  # `agent`, so that one is resolved by where its binary lands.
+  kind=""
   case "$tool" in
+    claude|codex|grok) kind="$tool" ;;
+    cursor-agent)      kind=cursor ;;
+    agent) case "$(/usr/bin/readlink -f "$(command -v agent || true)" 2>/dev/null)" in
+             "$HOME"/.grok/*)                     kind=grok ;;
+             "$HOME"/.local/share/cursor-agent/*) kind=cursor ;;
+           esac ;;
+  esac
+  case "$kind" in
     claude) cmd=("$(command -v claude || true)" --dangerously-skip-permissions) ;;
     codex)  cmd=("$(command -v codex || true)" --dangerously-bypass-approvals-and-sandbox) ;;
     # A private leader socket: grok spawns its leader INSIDE the box instead of joining an unsandboxed one.
-    grok)   cmd=("$(command -v grok || true)" --always-approve \
+    grok)   cmd=("$(command -v "$tool" || true)" --always-approve \
                  --leader-socket "${TMPDIR:-/tmp}/sandfence-grok-$$.sock") ;;
+    # Its own sandbox can't nest inside ours; trust is remembered in state we deny, so grant it per run.
+    cursor) cmd=("$(command -v "$tool" || true)" --force --trust --sandbox disabled) ;;
     *)      cmd=("$tool") ;;
   esac
 elif [[ -n "$print_only" ]]; then
-  tool=""; cmd=()                 # --print with no tool: show the baseline profile
+  tool=""; kind=""; cmd=()        # --print with no tool: show the baseline profile
 else
   usage 1
 fi
-# The tool's own bundle auto-applies; --claude/--codex/--grok add the OTHER agent's bundle too
-# (e.g. `--codex claude` lets a claude session also read/run codex). See DESIGN.md ("Agent bundles").
-case "$tool" in claude|codex|grok) agents+=("$tool") ;; esac
+# The tool's own bundle auto-applies; --claude/--codex/--grok/--cursor add another agent's bundle
+# (e.g. `--codex claude` lets a claude session also run codex). See DESIGN.md ("Agent bundles").
+[ -n "$kind" ] && agents+=("$kind")
 
 # ---------------------------------------------------------------------------
 # Static baseline: read-only, secret-free. NOTE: never grant (subpath "/System")
@@ -351,8 +365,42 @@ for a in "${agents[@]+"${agents[@]}"}"; do
       # Without the WindowServer, grok's TUI deadlocks on Backspace/Esc. See DESIGN.md for the cost.
       dynamic+="(allow mach-lookup (global-name \"com.apple.windowserver.active\"))"$'\n'
       ;;
+    cursor)
+      sect "cursor-agent: install + ~/.cursor read-only, its runtime state (rw) allowlisted"
+      cursor_bin="$(command -v cursor-agent || true)"
+      case "$cursor_bin" in /*) grant_file "$cursor_bin" ;; esac   # absolute only (a symlink into versions/<v>/)
+      # It installs `agent` beside that; ~/.local/bin itself is never readable, so grant the name when it's cursor's.
+      agent_bin="$(command -v agent || true)"
+      case "$agent_bin" in /*) case "$(/usr/bin/readlink -f "$agent_bin" 2>/dev/null)" in
+        "$home_real"/.local/share/cursor-agent/*) grant_file "$agent_bin" ;; esac ;; esac
+      grant_ro "$HOME/.local/share/cursor-agent"                   # its bundled node, index.js, rg, spawn-helper
+      # ~/.cursor is Cursor.app's too, and mostly code (extensions/, plugins/, skills, mcp.json) plus
+      # cli-config.json, whose permissions.allow auto-approves tools in a later UNsandboxed run. Same
+      # shape as grok. Deliberately absent though rewritten at launch: cli-config.json,
+      # statsig-cache.json, the skills-cursor/ sync.
+      grant_ro "$HOME/.cursor"
+      for f in auth.json mcp-auth.json agent-cli-state.json cli-workspaces.json debug- \
+               chats projects plans snapshots worktrees browser-logs ai-tracking; do
+        dynamic+="(allow file-write* (prefix \"$HOME/.cursor/$f\"))"$'\n'
+      done
+      # …except, under projects/, a project's trust marker and remembered MCP-server approvals, at any depth.
+      dynamic+="(deny file-write* (require-all (subpath \"$HOME/.cursor/projects\") (regex #\"/(\\.workspace-trusted|mcp-approvals\\.json)\$\")))"$'\n'
+      # …but the working copy's own marker is allowed: `--trust` writes it and exits if it can't, and trusting
+      # the directory you launched in is what running sandfence there means. Cursor names the project dir by
+      # the path with every non-alphanumeric run turned into one dash (two paths can share a name; that
+      # conflation is Cursor's own).
+      proj="$(printf '%s' "$workdir" | LC_ALL=C /usr/bin/sed 's/[^a-zA-Z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+      dynamic+="(allow file-write* (literal \"$HOME/.cursor/projects/$proj/.workspace-trusted\"))"$'\n'
+      # For that to stay narrow the names directly under projects/ are frozen: no create, rename or delete of
+      # projects/<name>, since a rename or a symlink would carry a trust marker onto another project's name.
+      # The launcher creates the working copy's dir before the box starts (below); cursor needs no other.
+      dynamic+="(deny file-write-create file-write-unlink (literal \"$HOME/.cursor/projects\"))"$'\n'
+      dynamic+="(deny file-write-create file-write-unlink (require-all (subpath \"$HOME/.cursor/projects\") (regex #\"/\\.cursor/projects/[^/]+\$\")))"$'\n'
+      ;;
   esac
 done
+# The command actually run may be a symlink beside the bundle's own binary (`agent`); grant it too.
+if [ -n "$kind" ]; then case "${cmd[0]}" in /*) grant_file "${cmd[0]}" ;; esac; fi
 
 # ---------------------------------------------------------------------------
 # Toolchain presets (--brew/--rust/--node/--python/--go): named bundles of -r/-w grants.
@@ -555,8 +603,15 @@ for a in "${agents[@]+"${agents[@]}"}"; do
     claude) mkdir -p "$HOME/.claude" 2>/dev/null || true ;;
     codex)  mkdir -p "$HOME/.codex"  2>/dev/null || true ;;
     grok)   mkdir -p "$HOME/.grok"   2>/dev/null || true ;;
+    cursor) mkdir -p "$HOME/.cursor/projects/$proj" 2>/dev/null || true ;;   # its per-project dir: frozen inside
   esac
 done
+# cursor-agent: credentials in a file (the Keychain is denied) and the V8 compile cache out of
+# ~/Library/Caches, which UNsandboxed runs load too. Both also go on the env allowlist below.
+if [[ " ${agents[*]-} " == *" cursor "* ]]; then
+  export AGENT_CLI_CREDENTIAL_STORE=file
+  export NODE_COMPILE_CACHE="${TMPDIR:-/tmp}/sandfence-cursor-cache"   # node creates it
+fi
 # --go caches: go aborts if it can't create them, and their parents aren't writable inside.
 [ -n "${gocache:-}" ] && { mkdir -p "$gopath/pkg/sumdb" "$gomodcache" "$gocache" 2>/dev/null || true; }
 # --node: pnpm's store + cache — their parents aren't writable inside (a corepack-only user has no ~/Library/pnpm) —
@@ -572,6 +627,7 @@ clean_env=()
 for name in PATH HOME USER LOGNAME SHELL TERM TMPDIR PWD \
             LANG LC_ALL LC_CTYPE TERM_PROGRAM COLORTERM __CF_USER_TEXT_ENCODING \
             XDG_CONFIG_HOME SSL_CERT_FILE GIT_CONFIG_GLOBAL NPM_CONFIG_USERCONFIG \
+            AGENT_CLI_CREDENTIAL_STORE NODE_COMPILE_CACHE \
             HOMEBREW_PREFIX GOPATH GOMODCACHE GOCACHE \
             FNM_DIR FNM_MULTISHELL_PATH FNM_VERSION_FILE_STRATEGY FNM_RESOLVE_ENGINES \
             FNM_COREPACK_ENABLED FNM_ARCH FNM_LOGLEVEL COREPACK_HOME PNPM_HOME \

@@ -1,6 +1,6 @@
 # Sandfence
 
-Run a coding agent — **Claude Code**, **Codex** or **Grok** — on a repo in its own
+Run a coding agent — **Claude Code**, **Codex**, **Grok** or **Cursor CLI** — on a repo in its own
 "skip-permissions" mode, while the **macOS sandbox**, not the agent, enforces what it
 can touch. A wrong `rm -rf`, a stray `git reset --hard`, a `pip install` into your
 system: the sandbox turns these from incidents into errors.
@@ -67,6 +67,14 @@ login Keychain, never your shell environment.
 - **Grok** — run `grok login` once, outside the sandbox (it opens a browser); its token
   lives in `~/.grok/auth.json`. Update grok outside too: it installs itself under `~/.grok`,
   which the sandbox keeps read-only.
+- **Cursor CLI** — run `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login` once, outside the
+  sandbox. The env var is what makes it store the token in `~/.cursor/auth.json` instead of the
+  login Keychain, which the sandbox denies; `s` sets the same var for the session. Update the CLI
+  outside too — its install under `~/.local/share/cursor-agent` is read-only inside.
+
+The Cursor CLI also installs itself as `agent`, and so does Grok, so which one `agent` runs
+depends on your PATH. `s` picks the bundle from the binary the name resolves to, not from the
+name.
 
 ## What the agent can touch
 
