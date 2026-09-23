@@ -70,7 +70,7 @@ login Keychain, never your shell environment.
 | | |
 |---|---|
 | **Read-write** | the current directory — your working copy |
-| **Read-only** | its own `.git` / `.jj` — you drive version control outside the sandbox; the agent can't commit or rewrite history |
+| **Read-only** | its own `.git` / `.jj` — you drive version control outside the sandbox; the agent can't commit or rewrite history. Also its agent config — `.claude/`, `.grok/`, `.codex/`, `.cursor/`, `.mcp.json` — whose hooks and MCP servers would run on your next *unsandboxed* agent session; edit those outside |
 | **Denied** | the rest of `$HOME` — `~/.ssh`, `~/.aws`, `gh`/`glab` tokens, the login Keychain, `~/.gitconfig` credentials, other repos |
 
 Widen it explicitly: **`-r PATH`** / **`-w PATH`** add a directory or file, and the

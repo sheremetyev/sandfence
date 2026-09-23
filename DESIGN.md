@@ -68,8 +68,8 @@ order (so last-match-wins lands the way we want):
 2. **Dynamic grants** (`$dynamic`) — built up by the helper functions for this specific
    run: the working copy, any worktree/workspace store, agent bundles, toolchain
    presets, `-r`/`-w`, the jj binary, global git ignore.
-3. **Repo-history denies** (`$repo_deny`) — the `.git`/`.jj` write-denies for every
-   writable directory, emitted **dead last** so nothing can override them.
+3. **Repo denies** (`$repo_deny`) — the `.git`/`.jj` and agent-config write-denies for
+   every writable directory, emitted **dead last** so nothing can override them.
 
 Run `sandfence.sh --print [flags] [tool]` to see the exact composed profile for any
 invocation. To check that an edit still produces valid SBPL, compile it without
@@ -157,6 +157,22 @@ Because jj snapshots the working copy into `.jj` on almost every command (a writ
 `.jj` is read-only), read-only jj commands must be run as `jj --ignore-working-copy …`.
 sandfence deliberately doesn't auto-wrap `jj` (that breaks subcommands like `jj git
 init`); tell the agent to add the flag.
+
+The repo's **agent config** is write-denied the same way: `.claude/`, `.grok/`,
+`.codex/`, `.cursor/`, and `.mcp.json` at the top of the working copy. These hold hooks,
+MCP servers, LSP commands, and permission rules. Once you've trusted the folder, an
+agent you run *unsandboxed* in that repo executes them, so an edit here would be a
+plant that fires outside the box, and one that doesn't show up as a commit. The denies
+cover whole directories, including the directory entry itself. A per-file deny could be
+bypassed by writing `.cursor2/hooks.json` and renaming the directory. This applies
+whatever tool is sandboxed, since any command could plant these files. The cost is
+that you edit a project's agent config (skills, commands, settings) from outside the
+sandbox. Only the top level is covered: nested `.claude/` dirs in a monorepo
+subproject, and other auto-run config such as `.vscode/tasks.json` or `mise.toml`,
+aren't denied. Nor is a differently-cased spelling: Seatbelt matches bytes, so on the
+default case-insensitive volume a fresh `.Claude/settings.json` isn't caught, though a
+later agent opening `.claude/settings.json` lands on it. That is a deliberate bypass,
+outside the threat model.
 
 ## Worktrees and workspaces
 
@@ -293,10 +309,11 @@ tree, `(deny …)` it *after* the grant so the deny wins.
 `-r PATH` (read-only) and `-w PATH` (read-write) add access to a directory or a single
 file. They're emitted **after** the presets and agent bundles, so an explicit grant
 *wins* over a preset deny — e.g. `-r ~/.cargo/config.toml` re-opens what `--rust`
-denied. The `.git`/`.jj` history denies come after even that, so they stay
-non-overridable. A `-w` directory keeps its own `.git`/`.jj` read-only, just like the
-working copy; `-r` directories are read-only wholesale. These are explicit opt-ins, so —
-unlike the working copy — they aren't home-guarded; that's your responsibility.
+denied. The `.git`/`.jj` history and agent-config denies come after even that, so they stay
+non-overridable. A `-w` directory keeps its own `.git`/`.jj` and agent config read-only,
+just like the working copy; `-r` directories are read-only wholesale. These are explicit
+opt-ins, so — unlike the working copy — they aren't home-guarded; that's your
+responsibility.
 
 Remember that anything you grant is visible not just to the agent but to **everything it
 runs**. With the network open, a read grant is also an exfiltration surface for a

@@ -5,7 +5,7 @@ set -euo pipefail
 # sandfence.sh — run a command under a default-deny macOS sandbox-exec profile.
 #
 # Grants: system runtime, temp, devices, process + network, the working copy
-# (read-write, its own .git/.jj read-only), and a few read-only tool configs.
+# (read-write, its own .git/.jj + agent config read-only), and a few read-only tool configs.
 # Denied by default: the rest of $HOME — ~/.ssh, ~/.aws, the login Keychain,
 # ~/.gitconfig credentials. See DESIGN.md for how it works and why each grant exists.
 #
@@ -17,7 +17,7 @@ usage() {
   printf '%s\n' \
     'Usage: sandfence.sh [-r PATH]... [-w PATH]... [--print] <tool> [args...]' \
     '  -r PATH    read-only access to a dir or file   (repeatable)' \
-    '  -w PATH    read-write access to a dir or file  (repeatable; a dir keeps its .git/.jj read-only)' \
+    '  -w PATH    read-write access to a dir or file  (repeatable; a dir keeps its .git/.jj + agent config read-only)' \
     '  --claude   also grant the claude agent bundle (binary + ~/.claude state; auth via file, not Keychain)' \
     '  --codex    also grant the codex agent bundle  (binary + node runtime + ~/.codex state)' \
     '  --rust/--node/--python/--go  toolchain preset: caches writable, registry tokens + PATH-plant denied' \
@@ -74,8 +74,12 @@ abspath() {                   # <path> <base> — resolve to a canonical abs dir
 is_git_store() {              # <dir> — a REAL git store: basename .git, with HEAD + objects/
   [ "${1##*/}" = .git ] && [ -e "$1/HEAD" ] && [ -d "$1/objects" ]
 }
-deny_repo_meta() {            # <abs-dir> — write-deny its own top-level .git/.jj
-  repo_deny+="(deny file-write* (subpath \"$1/.git\") (literal \"$1/.git\") (subpath \"$1/.jj\") (literal \"$1/.jj\"))"$'\n'
+deny_repo_meta() {            # <abs-dir> — write-deny its own top-level .git/.jj + agent config
+  # Agent config (hooks, MCP servers, permissions) runs in a later UNsandboxed session here. Whole
+  # dirs, entry included: a per-file deny is bypassed by renaming a prepared .cursor2/ into place.
+  local n rule="(deny file-write*"
+  for n in .git .jj .claude .grok .codex .cursor .mcp.json; do rule+=" (subpath \"$1/$n\") (literal \"$1/$n\")"; done
+  repo_deny+="$rule)"$'\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -228,7 +232,9 @@ SBPL
 # ---------------------------------------------------------------------------
 # Working copy: the current dir, read-write (reaching it needs ancestor
 # traversal). Its own top-level .git/.jj is write-denied via $repo_deny (emitted
-# last) so the agent can edit code but can't commit, amend, or rewrite history.
+# last) so the agent can edit code but can't commit, amend, or rewrite history —
+# and so is its agent config (.claude, .grok, .codex, .cursor, .mcp.json), which a
+# later UNsandboxed agent would execute.
 # HOME is interpolated into (literal ...); validate it before composing.
 # ---------------------------------------------------------------------------
 validate_path "$HOME" "HOME"
@@ -246,7 +252,7 @@ case "$home_real/" in
 esac
 
 dynamic=";; --- working copy (read-write) ---"$'\n'
-repo_deny=";; --- repo history: working copy's own .git/.jj write-denied (last) ---"$'\n'
+repo_deny=";; --- repo history + agent config: working copy's own .git/.jj/.claude/.grok/… write-denied (last) ---"$'\n'
 grant_rw "$workdir"
 deny_repo_meta "$workdir"
 
@@ -485,9 +491,9 @@ fi
 
 # -r / -w: extra read-only / read-write access to a dir or single file (repeatable).
 # Emitted LAST so an explicit grant WINS over a preset/agent deny (e.g. -r ~/.cargo/config.toml
-# re-opens what --rust denied). A -w dir keeps its own .git/.jj read-only; -r is read-only
+# re-opens what --rust denied). A -w dir keeps its own .git/.jj + agent config read-only; -r is read-only
 # wholesale. Explicit opt-ins, so (unlike the working copy) not home-guarded. (The .git/.jj
-# history denies still come after, in $repo_deny, so those stay non-overridable.)
+# history + agent-config denies still come after, in $repo_deny, so those stay non-overridable.)
 if [[ ${#writes[@]} -gt 0 || ${#reads[@]} -gt 0 ]]; then
   sect "extra access (-r / -w; wins over presets/agents)"
 fi

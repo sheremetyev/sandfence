@@ -173,6 +173,22 @@ else
   assert_allow_in "$wc" "create a new file in the working copy"    /bin/sh -c 'echo x > newfile.txt'
   # …but its own .git is not writable, so history can't be rewritten.
   assert_deny_in  "$wc" "writing inside .git is denied"            /bin/sh -c 'echo x > .git/sandfence_intrusion'
+  # Its agent config is write-denied too. Pre-created unsandboxed so each probe reaches the deny, not a
+  # missing parent, and the CONTENT is checked: an exit code can't tell a denied write from another failure.
+  for p in .claude/settings.json .codex/config.toml .cursor/hooks.json .mcp.json; do
+    case "$p" in */*) mkdir -p "$wc/${p%/*}" ;; esac
+    printf 'ORIG\n' > "$wc/$p"
+    sf_in "$wc" /bin/sh -c "echo CLOBBER > '$p'" >/dev/null 2>&1
+    if grep -q CLOBBER "$wc/$p" 2>/dev/null; then bad "repo agent config: overwriting $p is denied"
+    else ok "repo agent config: overwriting $p is denied"; fi
+  done
+  # Whole dirs, entry included: no new file inside, no renaming the dir away, no renaming one in.
+  assert_deny_in  "$wc" "repo agent config: adding a file to .claude/ is denied"   /bin/sh -c 'echo x > .claude/new.json'
+  assert_deny_in  "$wc" "repo agent config: renaming .claude/ away is denied"      /bin/mv .claude .claude.bak
+  assert_deny_in  "$wc" "repo agent config: renaming a dir into .grok is denied" \
+    /bin/sh -c 'rm -rf staged && mkdir staged && echo x > staged/config.toml && mv staged .grok'
+  assert_allow_in "$wc" "repo agent config: a nested .claude (not top level) is writable" \
+    /bin/sh -c 'mkdir -p sub/.claude && echo x > sub/.claude/settings.json'
   # git init in a scratch SUBDIR works (the deny is only the top-level .git), which
   # also proves git genuinely runs in the sandbox — so a commit failure below is the
   # sandbox denying the .git write, not git being broken.
@@ -203,6 +219,7 @@ assert_allow_in "$wc" "-r file: a single file is readable"    -r "$ro/file.txt" 
 assert_allow_in "$wc" "-w dir: writable"                      -w "$rw" /bin/sh -c "echo x > '$rw/new.txt'"
 if [ -d "$rw/.git" ]; then
   assert_deny_in "$wc" "-w dir: its own .git is write-denied"  -w "$rw" /bin/sh -c "echo x > '$rw/.git/intrusion'"
+  assert_deny_in "$wc" "-w dir: its own .mcp.json is write-denied" -w "$rw" /bin/sh -c "echo x > '$rw/.mcp.json'"
 else
   bad "setup: could not git-init the -w test dir (.git probe skipped)"
 fi
