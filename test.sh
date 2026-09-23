@@ -226,10 +226,9 @@ fi
 
 echo
 echo "[agents]"
-# The claude / codex bundles (--claude / --codex, or the agent as the tool) grant each agent's
-# own binary + state dir — auth lives in a file there (~/.claude/.credentials.json, ~/.codex/
-# auth.json), never the Keychain — while write-denying the persistence files (settings.json /
-# config.toml) that would otherwise fire hooks on a later UNsandboxed run. We drive the bundle
+# The agent bundles (--claude / --codex, or the agent as the tool) grant each agent's own binary +
+# state — auth lives in a file there (~/.claude/.credentials.json, ~/.codex/auth.json), never the
+# Keychain — while write-denying what a later UNsandboxed run loads (config, hooks). We drive the bundle
 # with the FLAGS (they apply a bundle regardless of the command actually run) plus a harmless
 # probe, with HOME redirected to an isolated fake home so nothing touches your real ~/.claude /
 # ~/.codex (same trick as the jj XDG test). The bundle reads $HOME from the env, so a redirected
@@ -249,15 +248,34 @@ sf_home() { ( cd "$wc" && HOME="$fakehome" "$SF" "$@" ); }   # sandfence from th
 assert_allow_home() { local d="$1"; shift; if sf_home "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d (expected success, got failure)"; fi; }
 assert_deny_home()  { local d="$1"; shift; if sf_home "$@" >/dev/null 2>&1; then bad "$d (expected failure, but it succeeded)"; else ok "$d"; fi; }
 
-# claude: own state reachable (incl. the file-based credential), so the agent can authenticate.
-assert_allow_home "claude: own ~/.claude/.credentials.json is readable"  --claude /bin/cat "$fakehome/.claude/.credentials.json"
-assert_allow_home "claude: own ~/.claude state dir is writable"          --claude /bin/sh -c "echo x > '$fakehome/.claude/state_probe'"
-# …but settings.json is write-denied (it carries hooks/statusLine/apiKeyHelper that would run on a
-# later UNsandboxed claude). Check the file CONTENT, not just exit code: it must be byte-unchanged.
-sf_home --claude /bin/sh -c "echo CLOBBER > '$fakehome/.claude/settings.json'" >/dev/null 2>&1
-if grep -q CLOBBER "$fakehome/.claude/settings.json" 2>/dev/null; then
-  bad "claude: settings.json write is denied (persistence guard)"
-else ok "claude: settings.json write is denied (persistence guard)"; fi
+# claude: ~/.claude is read-only (settings, CLAUDE.md, skills, commands, plugins, hooks, keybindings are
+# loaded by a later UNsandboxed claude), with runtime state opened by name — same shape as grok.
+mkdir -p "$fakehome/.claude/skills/s" "$fakehome/.claude/skills/synced/a" "$fakehome/.claude/commands" "$fakehome/.claude/plugins/marketplaces/m" \
+         "$fakehome/.claude/hooks" "$fakehome/.claude/chrome" "$fakehome/.claude/local/bin" \
+         "$fakehome/.claude/projects/p" "$fakehome/.claude/shell-snapshots"
+for f in CLAUDE.md skills/s/SKILL.md skills/synced/a/SKILL.md commands/c.md plugins/marketplaces/m/p.js \
+         plugins/installed_plugins.json hooks/h.sh keybindings.json chrome/chrome-native-host local/bin/claude; do
+  printf 'ORIG\n' > "$fakehome/.claude/$f"
+done
+assert_allow_home "claude: own ~/.claude/.credentials.json is readable"    --claude /bin/cat "$fakehome/.claude/.credentials.json"
+assert_allow_home "claude: own ~/.claude/.credentials.json is writable"    --claude /bin/sh -c "echo x >> '$fakehome/.claude/.credentials.json'"
+assert_allow_home "claude: its projects/ + shell-snapshots/ are writable"  --claude /bin/sh -c "echo x > '$fakehome/.claude/projects/p/s.jsonl' && echo x > '$fakehome/.claude/shell-snapshots/s.sh'"
+assert_allow_home "claude: plugins/blocklist.json (state) is writable"     --claude /bin/sh -c "echo x > '$fakehome/.claude/plugins/blocklist.json'"
+assert_allow_home "claude: state/ is writable"                            --claude /bin/sh -c "mkdir -p '$fakehome/.claude/state' && echo x > '$fakehome/.claude/state/verdicts.json'"
+# The credential store wraps every token write/refresh in a mkdir'd lock beside .credentials.json.
+assert_allow_home "claude: the credential store's lock dirs can be created" --claude /bin/sh -c "mkdir '$fakehome/.claude/.storage-write.lock' '$fakehome/.claude/.oauth_refresh.lock' && echo x > '$fakehome/.claude/.oauth_refresh.lock.owner'"
+assert_deny_home  "claude: an unlisted NEW file under ~/.claude is denied" --claude /bin/sh -c "echo x > '$fakehome/.claude/future-hooks.json'"
+# Each of these is loaded by a later claude; check the CONTENT, not just the exit code.
+for f in settings.json CLAUDE.md skills/s/SKILL.md skills/synced/a/SKILL.md commands/c.md plugins/marketplaces/m/p.js \
+         plugins/installed_plugins.json hooks/h.sh keybindings.json chrome/chrome-native-host local/bin/claude; do
+  sf_home --claude /bin/sh -c "echo CLOBBER > '$fakehome/.claude/$f'" >/dev/null 2>&1
+  if grep -q CLOBBER "$fakehome/.claude/$f" 2>/dev/null; then
+    bad "claude: ~/.claude/$f write is denied (persistence guard)"
+  else ok "claude: ~/.claude/$f write is denied (persistence guard)"; fi
+done
+# Rename probes come AFTER the content guards: a rename that wrongly succeeded would remove the guards'
+# targets, and a write to a missing parent is a false PASS.
+assert_deny_home  "claude: skills/ can't be swapped out by rename"         --claude /bin/mv "$fakehome/.claude/skills" "$fakehome/.claude/skills.old"
 # The login Keychain is never granted, even with the claude bundle active.
 assert_deny_home "claude: login Keychain is denied"                      --claude /bin/cat "$fakehome/Library/Keychains/login.keychain-db"
 
@@ -302,7 +320,6 @@ assert_allow_home "grok: its sessions/ dir is writable"                  --grok 
 assert_allow_home "grok: an atomic-write temp file is writable"          --grok /bin/sh -c "echo x > '$fakehome/.grok/.tmpAbC123'"
 assert_deny_home  "grok: an unlisted NEW file under ~/.grok is denied"   --grok /bin/sh -c "echo x > '$fakehome/.grok/future-hooks.json'"
 assert_deny_home  "grok: a permission.toml built deeper can't be staged" --grok /bin/sh -c "mkdir -p '$fakehome/.grok/sessions/stage/p2' && echo x > '$fakehome/.grok/sessions/stage/p2/permission.toml'"
-assert_deny_home  "grok: its bin/ can't be swapped out by rename"        --grok /bin/mv "$fakehome/.grok/bin" "$fakehome/.grok/bin.old"
 # Each of these is code or config a later grok loads; check the CONTENT, not just the exit code.
 for f in config.toml trusted_folders.toml bin/grok vendor/rg-15.0.0-override hooks-paths requirements.toml \
          lsp.json disabled-hooks settings_cache.json models_cache.json sessions/proj/permission.toml; do
@@ -311,6 +328,7 @@ for f in config.toml trusted_folders.toml bin/grok vendor/rg-15.0.0-override hoo
     bad "grok: ~/.grok/$f write is denied (persistence guard)"
   else ok "grok: ~/.grok/$f write is denied (persistence guard)"; fi
 done
+assert_deny_home  "grok: its bin/ can't be swapped out by rename"        --grok /bin/mv "$fakehome/.grok/bin" "$fakehome/.grok/bin.old"
 # No unix sockets under ~/.grok: never join an UNsandboxed grok's leader, nor bind one it would join.
 # The bind probe uses a writable path (sessions/), so only the network rule can be what denies it.
 sock="$fakehome/.grok/leader.sock"; bsock="$fakehome/.grok/sessions/leader.sock"
@@ -359,7 +377,6 @@ assert_deny_home  "cursor: projects/ itself can't be renamed"                --c
 assert_deny_home  "cursor: another project's trust marker is denied"       --cursor /bin/sh -c "echo x > '$fakehome/.cursor/projects/Users-someone-else/.workspace-trusted'"
 # projects/ is writable state, except the per-project trust marker and MCP approvals, at any depth.
 assert_deny_home  "cursor: a .workspace-trusted built deeper can't be staged" --cursor /bin/sh -c "mkdir -p '$fakehome/.cursor/projects/stage/p2' && echo x > '$fakehome/.cursor/projects/stage/p2/.workspace-trusted'"
-assert_deny_home  "cursor: extensions/ can't be swapped out by rename"     --cursor /bin/mv "$fakehome/.cursor/extensions" "$fakehome/.cursor/extensions.old"
 # Each of these is code or config a later cursor-agent — or Cursor.app — loads; check the CONTENT.
 for f in cli-config.json statsig-cache.json mcp.json argv.json ide_state.json extensions/ext.js \
          plugins/local/p.js skills-cursor/s/SKILL.md agents/a.md agent-helper/bin/helper \
@@ -369,6 +386,7 @@ for f in cli-config.json statsig-cache.json mcp.json argv.json ide_state.json ex
     bad "cursor: ~/.cursor/$f write is denied (persistence guard)"
   else ok "cursor: ~/.cursor/$f write is denied (persistence guard)"; fi
 done
+assert_deny_home  "cursor: extensions/ can't be swapped out by rename"     --cursor /bin/mv "$fakehome/.cursor/extensions" "$fakehome/.cursor/extensions.old"
 # `agent` is installed by BOTH grok and cursor-agent, so the bundle follows the resolved binary.
 mkdir -p "$fakehome/.local/share/cursor-agent/versions/v1" "$fakehome/.grok/bin"
 : > "$fakehome/.local/share/cursor-agent/versions/v1/cursor-agent"

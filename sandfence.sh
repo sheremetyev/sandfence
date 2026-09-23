@@ -18,7 +18,7 @@ usage() {
     'Usage: sandfence.sh [-r PATH]... [-w PATH]... [--print] <tool> [args...]' \
     '  -r PATH    read-only access to a dir or file   (repeatable)' \
     '  -w PATH    read-write access to a dir or file  (repeatable; a dir keeps its .git/.jj + agent config read-only)' \
-    '  --claude   also grant the claude agent bundle (binary + ~/.claude state; auth via file, not Keychain)' \
+    '  --claude   also grant the claude agent bundle (binary + ~/.claude read-only; only its runtime state writable)' \
     '  --codex    also grant the codex agent bundle  (binary + node runtime + ~/.codex state)' \
     '  --grok     also grant the grok agent bundle   (binary + ~/.grok read-only; only its runtime state writable)' \
     '  --cursor   also grant the cursor-agent bundle (binary + ~/.cursor read-only; only its runtime state writable)' \
@@ -304,22 +304,30 @@ if [ -f "$workdir/.jj/repo" ]; then                                  # secondary
 fi
 
 # ---------------------------------------------------------------------------
-# Agent bundles (--claude/--codex/--grok, or the agent as the tool): grant each
-# agent's own binary + state dir. Auth is a file there (~/.claude/.credentials.json,
-# ~/.codex/auth.json, ~/.grok/auth.json), never the Keychain. settings.json / config.toml are
-# write-denied — they carry hooks / MCP / notify commands that would fire on a
-# later UNsandboxed run (the deny follows the rw grant, so last-match-wins blocks
-# the write while reads still work). See DESIGN.md ("Agent bundles").
+# Agent bundles (--claude/--codex/--grok/--cursor, or the agent as the tool): grant each
+# agent's own binary + state. Auth is a file there (~/.claude/.credentials.json,
+# ~/.codex/auth.json, …), never the Keychain. What a later UNsandboxed run loads (config,
+# hooks, MCP, skills, plugins) is write-denied: codex's config.toml by name; the other
+# three dirs read-only wholesale with their runtime state allowlisted. See DESIGN.md ("Agent bundles").
 # ---------------------------------------------------------------------------
 for a in "${agents[@]+"${agents[@]}"}"; do
   case "$a" in
     claude)
-      sect "claude: binary (ro) + own state (rw); settings.json write-denied"
+      sect "claude: binary (ro) + ~/.claude read-only, its runtime state (rw) allowlisted"
       claude_bin="$(command -v claude || true)"
       case "$claude_bin" in /*) grant_file "$claude_bin" ;; esac   # absolute only
       grant_ro "$HOME/.local/share/claude"
-      grant_rw "$HOME/.claude"
-      dynamic+="(deny file-write* (literal \"$HOME/.claude/settings.json\") (literal \"$HOME/.claude/settings.local.json\"))"$'\n'
+      # ~/.claude mixes state with what a later UNsandboxed claude loads: settings, CLAUDE.md, skills,
+      # commands, plugins, hook scripts, keybindings, a local install. Same shape as grok: read-only, then
+      # runtime state by name. The two .lock entries are directories the credential store creates around
+      # every token write and refresh; without them /login reports success but saves nothing.
+      # Deliberately absent: skills/synced, plugins/synced (loaded like skills/) and the marketplace refresh.
+      grant_ro "$HOME/.claude"
+      for f in .credentials.json .storage-write.lock .oauth_refresh.lock .last- history.jsonl stats-cache.json \
+               backups cache daemon debug ide jobs paste-cache projects session-env sessions shell-snapshots state \
+               plugins/blocklist.json plugins/plugin-catalog-cache.json plugins/.last_inuse_sweep plugins/data; do
+        dynamic+="(allow file-write* (prefix \"$HOME/.claude/$f\"))"$'\n'
+      done
       grant_rw "$HOME/.cache/claude"
       grant_rw "$HOME/.local/state/claude"
       dynamic+="(allow file-read* file-write* (prefix \"$HOME/.claude.json\"))"$'\n'   # ~/.claude.json[.backup]: session/project state

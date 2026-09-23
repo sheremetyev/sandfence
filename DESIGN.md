@@ -196,8 +196,9 @@ exactly where expected — so a symlinked or forged `.git` can't redirect the gr
 ## Agent bundles
 
 `claude`/`codex`/`grok`/`cursor-agent` as the tool (or `--claude`/`--codex`/`--grok`/`--cursor`
-as a flag) adds a bundle for that agent: read+exec of its own binary, and read-write to its own
-state directory. Deliberate choices:
+as a flag) adds a bundle for that agent: read+exec of its own binary, and its own state
+directory — read-write for codex, read-only with the runtime state allowlisted for the other
+three. Deliberate choices:
 
 - **Auth is a file, never the Keychain.** Each agent authenticates from a credential
   file in its own granted state dir (`~/.claude/.credentials.json`,
@@ -205,11 +206,23 @@ state directory. Deliberate choices:
   Keychain is never granted, and the token never sits in the environment. The only
   credential the agent can reach is its own — which is what makes leaving the network
   open acceptable.
-- **Persistence files are write-denied.** `~/.claude/settings.json` and
-  `~/.codex/config.toml` carry hooks, MCP servers, and notify commands that would run on
-  a *later, unsandboxed* invocation. They're readable but not writable (same
-  last-match-wins trick as `.git`), so a sandboxed run can't plant something that fires
-  outside the box later.
+- **Persistence files are write-denied.** `~/.codex/config.toml` carries MCP servers and
+  notify commands that would run on a *later, unsandboxed* invocation. It's readable but
+  not writable (same last-match-wins trick as `.git`), so a sandboxed run can't plant
+  something that fires outside the box later.
+- **claude's state dir is read-only, with its runtime state allowlisted.** `~/.claude`
+  holds `settings.json`, the global `CLAUDE.md`, `skills/`, `commands/`, installed
+  plugins and their marketplaces, hook scripts, `keybindings.json`, and sometimes a
+  local install, all loaded by a later unsandboxed Claude Code. So the directory is
+  read-only and the runtime state is opened by name: the credential file, `projects/`
+  (transcripts and auto-memory), `sessions/`, `shell-snapshots/`, `history.jsonl`,
+  `state/`, caches, backups, debug logs, the credential store's lock directories, and
+  under `plugins/` only the blocklist, catalog cache and per-plugin data. The cost:
+  plugin installs, the launch-time marketplace refresh and the `skills/synced` and
+  `plugins/synced` syncs fail inside; do those outside. `~/.claude.json` stays
+  read-write, since Claude Code rewrites it on every run; it also records per-project
+  trust and MCP servers, which is the one remaining channel here and, like the case gap
+  above, out of the threat model.
 - **grok's state dir is read-only, with its runtime state allowlisted.** `~/.grok`
   mixes state with things a later unsandboxed grok, or your shell, executes: the grok
   binary itself (`bin/`, `downloads/`), an extracted ripgrep (`vendor/`),
