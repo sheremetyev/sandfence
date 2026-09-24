@@ -150,8 +150,11 @@ you can review the diff. `.git`/`.jj` *elsewhere* (a scratch checkout, a nested 
 stays writable, so `git init`/`clone` still work.
 
 sandfence refuses to run if the working copy would be `/`, `$HOME`, or a parent of
-`$HOME` — that would hand the agent read-write to every secret under your home. Run it
-from a project subdirectory.
+`$HOME` — that would hand the agent read-write to every secret under your home. It also
+refuses a working copy inside an agent's state directory (`~/.claude`, `~/.codex`,
+`~/.grok`, `~/.cursor`, the Cursor CLI install): the working-copy grant comes first and
+would make it read-write, and a later read-only grant can't take an allow back. The path
+is resolved, so a symlink into one is refused too. Run it from a project subdirectory.
 
 Because jj snapshots the working copy into `.jj` on almost every command (a write, and
 `.jj` is read-only), read-only jj commands must be run as `jj --ignore-working-copy …`.

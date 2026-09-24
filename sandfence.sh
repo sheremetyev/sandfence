@@ -268,6 +268,13 @@ fi
 case "$home_real/" in
   "$workdir"/*) echo "sandfence.sh: refusing to grant '$workdir' read-write — it contains your home directory" >&2; exit 1 ;;
 esac
+# …nor inside an agent's state dir: this grant would make it read-write before the bundle's read-only
+# one, and an allow can't be taken back.
+for d in .claude .codex .grok .cursor .local/share/cursor-agent; do
+  case "$workdir" in "$home_real/$d"|"$home_real/$d"/*)
+    echo "sandfence.sh: refusing to grant '$workdir' read-write — it is an agent's state directory" >&2; exit 1 ;;
+  esac
+done
 
 dynamic=";; --- working copy (read-write) ---"$'\n'
 repo_deny=";; --- repo history + agent config: working copy's own .git/.jj/.claude/.grok/… write-denied (last) ---"$'\n'

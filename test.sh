@@ -145,6 +145,17 @@ echo "[launch guard]"
 # Launching with the working copy = $HOME (or /) is refused outright — it would
 # grant the whole home tree read-write. The wrapper refuses before sandboxing.
 assert_deny_in "$HOME" "launching from \$HOME is refused"          /usr/bin/true
+# …and from inside an agent's own state dir: the working-copy grant would make it read-write before
+# the bundle's read-only grant, and an allow can't be taken back. The path is resolved, so a symlink
+# into it is refused too. (--print: the refusal is in the launcher, before any profile.)
+guardhome="$root/guardhome"; rm -rf "$guardhome" "$root/wc-link"
+mkdir -p "$guardhome/.cursor/sub" "$guardhome/.claude"; ln -s "$guardhome/.claude" "$root/wc-link"
+for d in .claude .cursor/sub; do
+  if ( cd "$guardhome/$d" && HOME="$guardhome" "$SF" --print /usr/bin/true ) >/dev/null 2>&1; then
+    bad "launching from ~/$d is refused"; else ok "launching from ~/$d is refused"; fi
+done
+if ( cd "$root/wc-link" && HOME="$guardhome" "$SF" --print /usr/bin/true ) >/dev/null 2>&1; then
+  bad "launching from a symlink into ~/.claude is refused"; else ok "launching from a symlink into ~/.claude is refused"; fi
 
 echo
 echo "[working copy]"
