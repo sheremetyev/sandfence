@@ -344,6 +344,11 @@ for a in "${agents[@]+"${agents[@]}"}"; do
       sect "codex: node runtime (ro) + own state incl. auth.json (rw); config.toml write-denied"
       grant_rw "$HOME/.codex"
       dynamic+="(deny file-write* (literal \"$HOME/.codex/config.toml\"))"$'\n'
+      # Directory trust lives in that file too, so the TUI's trust prompt fails to save. Pass the working
+      # copy's trust as an in-memory override instead. It is an inline table because `-c` splits its key on
+      # dots without honouring quotes, so `projects."<path>"` can't name a directory with a dot in it.
+      # ($workdir is a valid TOML string as is: validate_path refused quotes, backslashes and controls.)
+      [ "$kind" = codex ] && cmd+=(-c "projects={\"$workdir\"={trust_level=\"trusted\"}}")
       codex_bin="$(command -v codex || true)"
       case "$codex_bin" in /*) ;; *) codex_bin="" ;; esac   # ignore a relative hit (PATH has '.') — untrusted + would hang emit_ancestors
       if [[ -n "$codex_bin" ]]; then

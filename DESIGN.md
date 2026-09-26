@@ -212,7 +212,9 @@ three. Deliberate choices:
 - **Persistence files are write-denied.** `~/.codex/config.toml` carries MCP servers and
   notify commands that would run on a *later, unsandboxed* invocation. It's readable but
   not writable (same last-match-wins trick as `.git`), so a sandboxed run can't plant
-  something that fires outside the box later.
+  something that fires outside the box later. Directory trust is remembered there too,
+  so the launcher passes the working copy's trust as a `-c` override, an inline
+  `projects` table because the dotted form can't quote a path containing a dot.
 - **claude's state dir is read-only, with its runtime state allowlisted.** `~/.claude`
   holds `settings.json`, the global `CLAUDE.md`, `skills/`, `commands/`, installed
   plugins and their marketplaces, hook scripts, `keybindings.json`, and sometimes a

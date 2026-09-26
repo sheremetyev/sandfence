@@ -63,7 +63,8 @@ login Keychain, never your shell environment.
   browser (the sandbox can't open one). It writes `~/.claude/.credentials.json` and
   refreshes it from then on.
 - **Codex** — run `codex login` once (anywhere); its token lives in `~/.codex/auth.json`,
-  which the sandbox reads.
+  which the sandbox reads. Directory trust is passed per run as a config override, since
+  Codex would otherwise save it to `config.toml`, which the sandbox denies.
 - **Grok** — run `grok login` once, outside the sandbox (it opens a browser); its token
   lives in `~/.grok/auth.json`. Update grok outside too: it installs itself under `~/.grok`,
   which the sandbox keeps read-only.
